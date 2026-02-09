@@ -3278,24 +3278,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fff-ude-example-memory-test"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "fff-encoding",
- "fff-ude",
-]
-
-[[package]]
-name = "fff-ude-example-noop"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "fff-encoding",
- "fff-ude",
-]
-
-[[package]]
 name = "fff-ude-example-pco"
 version = "0.1.0"
 dependencies = [
@@ -3346,18 +3328,6 @@ version = "0.1.0"
 dependencies = [
  "fff-ude",
  "wasm-test-encoders",
-]
-
-[[package]]
-name = "fff-ude-example2"
-version = "0.1.0"
-dependencies = [
- "arrow-buffer 53.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "arrow-data 53.3.0 (registry+https://github.com/rust-lang/crates.io-index)",
- "bytes",
- "fff-encoding",
- "fff-ude",
- "vortex-sampling-compressor",
 ]
 
 [[package]]
@@ -7096,14 +7066,6 @@ checksum = "06794f8f6c5c898b3275aebefa6b8a1cb24cd2c6c79397ab15774837a0bc5755"
 dependencies = [
  "winapi-util",
 ]
-
-[[package]]
-name = "test-size"
-version = "0.1.0"
-
-[[package]]
-name = "test-wmemcheck"
-version = "0.1.0"
 
 [[package]]
 name = "thiserror"

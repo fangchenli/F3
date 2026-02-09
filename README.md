@@ -4,7 +4,7 @@
 
 F3 is a data file format that is designed with efficiency, interoperability, and extensibility in mind. It provides a data organization that rectifies the layout shortcomings of the last-generation formats like Parquet, while at the same time maintaining good interoperability and extensibility (a.k.a future-proof) via embedded Wasm decoders.
 
-> ⚠️ This project is a research prototype verifying the ideas in the paper. You should not use it in production.
+> ⚠️ This project originated as a research prototype. We are actively transitioning to production-ready code. See [CONTRIBUTING.md](CONTRIBUTING.md) for development guidelines.
 
 ## Build instructions
 
@@ -30,6 +30,8 @@ cargo test -p fff-poc
 fff-ude*: ude stand for User-Defined-Encoding and code in those directories relates to the Wasm decoding implementation.
 
 [scripts](scripts) and [exp_scripts](exp_scripts): scripts related to run the experiments.
+
+[research](research): Archived research code and experimental implementations preserved for paper reproduction. See [research/README.md](research/README.md) for details.
 
 ## Reproduction steps for the experiment results in the paper
 
