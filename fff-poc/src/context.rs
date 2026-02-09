@@ -52,11 +52,11 @@ pub struct WASMWritingContext {
 impl Default for WASMWritingContext {
     fn default() -> Self {
         Self {
-            // TODO: allow custom wasm path
+            // Built-in WASM decoder path is now configurable via FFF_BUILTIN_WASM_PATH env var
             wasms: HashMap::from([(
                 WASMId(0),
                 WasmLib {
-                    encode_lib_path: PathBuf::from("/").into(),
+                    encode_lib_path: BUILTIN_WASM_PATH.clone().into(),
                     decode_wasm_binary: std::fs::read(BUILTIN_WASM_PATH.as_path()).unwrap().into(),
                 },
             )]),

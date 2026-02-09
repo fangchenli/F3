@@ -19,6 +19,16 @@ cargo build -p fff-poc
 cargo test -p fff-poc
 ```
 
+## Configuration
+
+F3 supports environment variables for configuring WASM binary paths:
+
+- `FFF_BUILTIN_WASM_PATH`: Path to built-in FFF WASM decoder (default: `target/wasm32-wasip1/opt-size-lvl3/fff_ude_example_fff.wasm`)
+- `FFF_BP_WASM_PATH`: Path to bitpacking WASM decoder
+- `FFF_VORTEX_WASM_PATH`: Path to Vortex WASM decoder
+
+If not set, F3 will search common locations including the build directory and `/usr/local/lib/fff/`.
+
 ## Important directories
 
 [format](format): FlatBuffer definition of the file format.
