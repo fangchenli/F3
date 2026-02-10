@@ -6,7 +6,7 @@ use crate::reader::{
     get_metadata_buffer, read_file_based_on_footer, read_postscript, Projection, Selection,
 };
 use arrow_array::RecordBatch;
-use fff_core::errors::Result;
+use fff_core::errors::{Error, Result};
 
 /// FileReader v0, should be deprecated and prefer `FileReaderV2` instead.
 pub struct FileReader<R> {
@@ -33,7 +33,9 @@ impl<R: Reader> FileReader<R> {
             self.metadata_owner = Some(get_metadata_buffer(&self.reader, &post_script)?);
             let file_size = self.reader.size()? as usize;
             Footer::try_new(
-                self.metadata_owner.as_ref().unwrap(),
+                self.metadata_owner.as_ref().ok_or_else(|| {
+                    Error::General("Metadata buffer was not initialized".to_string())
+                })?,
                 file_size,
                 &post_script,
             )
@@ -49,8 +51,8 @@ impl<R: Reader> FileReader<R> {
         )
     }
 
-    fn _read_next(&mut self, _footer: &Footer) -> Option<RecordBatch> {
-        todo!("Implement read_next");
+    fn _read_next(&mut self, _footer: &Footer) -> Result<Option<RecordBatch>> {
+        Err(Error::NYI("Implement read_next".to_string()))
         // read next row group from file
         // let mut row_group_data = vec![0; footer.row_groups().row_counts().unwrap().get(0) as usize];
         // self.reader.read_exact(&mut row_group_data)?;
@@ -68,7 +70,9 @@ impl<R: Reader> FileReader<R> {
         self.metadata_owner = Some(get_metadata_buffer(&self.reader, post_script)?);
         let file_size = self.reader.size()? as usize;
         Footer::try_new(
-            self.metadata_owner.as_ref().unwrap(),
+            self.metadata_owner
+                .as_ref()
+                .ok_or_else(|| Error::General("Metadata buffer was not initialized".to_string()))?,
             file_size,
             post_script,
         )

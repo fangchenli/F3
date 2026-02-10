@@ -73,13 +73,13 @@ fn init_fff(input: &[u8], kwargs: &[u8]) -> Result<Box<dyn StatefulWasmDecoder>>
         builder.with_ppd(VtxPPD::new(
             Scalar::from(right.as_i32()),
             vortex_array::compute::Operator::Eq,
-        ))
+        ))?
     } else if let Some(enabled) = kwargs
         .get("partial_decode".as_bytes())
         .map(|b| *b.get(0).unwrap_or(&0) != 0)
     {
         if enabled {
-            builder.with_partial_decode(true)
+            builder.with_partial_decode(true)?
         } else {
             builder
         }

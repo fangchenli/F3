@@ -85,12 +85,10 @@ impl ListOfStructColEncoder {
         let encoder = VortexEncoder::default();
         let list_len = list_array.len();
         let enc_unit: Bytes = {
-            let encblock = encoder
-                .list_struct_encode(list_array.clone(), field.clone())
-                .unwrap();
+            let encblock = encoder.list_struct_encode(list_array.clone(), field.clone())?;
             let mut buffer = Vec::new();
             let mut cursor = Cursor::new(&mut buffer);
-            encblock.try_serialize(&mut cursor).unwrap();
+            encblock.try_serialize(&mut cursor)?;
             buffer.into()
         };
 
@@ -538,8 +536,14 @@ impl SharedDictColEncoder {
         self.buffered_array_mem_size = 0;
         let dict_idx = match self.submitted_dict_idx {
             Some(idx) => idx,
-            None => shared_dict_ctx
-                .new_dictionary(buffered_arrs.first().unwrap().data_type().clone())?,
+            None => {
+                let first_arr = buffered_arrs.first().ok_or_else(|| {
+                    fff_core::errors::Error::General(
+                        "Cannot encode empty buffer in SharedDictColEncoder".to_string(),
+                    )
+                })?;
+                shared_dict_ctx.new_dictionary(first_arr.data_type().clone())?
+            }
         };
         let indices_arrs = buffered_arrs
             .into_iter()
@@ -650,8 +654,12 @@ impl PhysicalColEncoder for SharedDictColEncoder {
         let dict_idx = match self.submitted_dict_idx {
             Some(idx) => idx,
             None => {
-                let idx = shared_dict_ctx
-                    .new_dictionary(self.buffered_arrays.first().unwrap().data_type().clone())?;
+                let first_arr = self.buffered_arrays.first().ok_or_else(|| {
+                    fff_core::errors::Error::General(
+                        "Cannot submit dict with empty buffer in SharedDictColEncoder".to_string(),
+                    )
+                })?;
+                let idx = shared_dict_ctx.new_dictionary(first_arr.data_type().clone())?;
                 self.submitted_dict_idx = Some(idx);
                 idx
             }
@@ -945,7 +953,12 @@ impl PhysicalColEncoder for GLBestEncoder {
             } else {
                 global_counter.dict_size = 0; // defer it at global dictionary encoding time
                 let global_dict_id = shared_dict_ctx.add_dictionary(global_dict);
-                assert_eq!(global_dict_id, peek_global_dict_id);
+                if global_dict_id != peek_global_dict_id {
+                    return Err(fff_core::errors::Error::General(format!(
+                        "Dictionary ID mismatch: expected {}, got {} (concurrent modification?)",
+                        peek_global_dict_id, global_dict_id
+                    )));
+                }
                 *counter = global_counter;
                 Ok(global_index_chunks)
             }
@@ -1050,7 +1063,7 @@ pub fn create_physical_encoder(
     dictionary_type: DictionaryTypeOptions,
     compression_type: fb::CompressionType,
 ) -> Result<Box<dyn PhysicalColEncoder>> {
-    match *data_type {
+    match data_type {
         non_nest_types!() => match dictionary_type {
             DictionaryTypeOptions::NoDictionary => Ok(Box::new(EncoderDictColEncoder::new(
                 max_chunk_size,
@@ -1089,7 +1102,12 @@ pub fn create_physical_encoder(
             true,
             compression_type,
         ))),
-        _ => todo!("Other data types not supported"),
+        other => {
+            return Err(fff_core::errors::Error::General(format!(
+                "Physical encoder not supported for data type {:?}",
+                other
+            )))
+        }
     }
 }
 

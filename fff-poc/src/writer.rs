@@ -75,19 +75,18 @@ where
             .into_iter()
             .map(|unit| {
                 let buf = unit.bytes();
-                self.write_and_update_file_level_checksum(buf.as_ref())
-                    .unwrap();
+                self.write_and_update_file_level_checksum(buf.as_ref())?;
                 if let Some(checksum) = &mut iounit_checksum {
                     checksum.update(buf.as_ref());
                 }
-                footer::EncUnit::new(
+                Ok(footer::EncUnit::new(
                     buf.len() as u32,
                     unit.num_rows(),
                     unit.encoding().clone(),
                     unit.compression_type(),
-                )
+                ))
             })
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         let size: u64 = self.writer.stream_position()? - offset;
         // use chunk.column_index to let the metadata knows which physical column does this chunk belong to
         Ok(Chunk::new(
@@ -198,10 +197,15 @@ impl<W: Write + Seek> FileWriter<W> {
                 options.write_built_in_wasm(),
                 !options.custom_encoding_options().is_empty(),
             ) {
-                (true, false) => WASMWritingContext::default_with_always_set_custom_wasm(),
+                (true, false) => WASMWritingContext::default_with_always_set_custom_wasm()?,
                 (false, true) => options.take_custom_encoding_options().into_context(),
                 (false, false) => WASMWritingContext::empty(),
-                _ => todo!("Cleanup this stupid code"),
+                (true, true) => {
+                    return Err(fff_core::errors::Error::General(
+                        "Cannot combine write_built_in_wasm with custom encoding options"
+                            .to_string(),
+                    ));
+                }
             },
         );
         let mut column_encoders = vec![];

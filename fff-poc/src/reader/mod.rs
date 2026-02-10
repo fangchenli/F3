@@ -46,10 +46,12 @@ pub fn get_max_chunk_size<R: Reader + Clone>(reader: R) -> Result<usize> {
     let rg_metas = footer.row_group_metadatas();
     for rg_meta in rg_metas {
         for col_meta in rg_meta.column_metadatas.iter() {
-            col_meta.column_chunks().unwrap().iter().for_each(|chunk| {
-                // log::error!("chunk size: {}", chunk.size_());
+            let chunks = col_meta.column_chunks().ok_or_else(|| {
+                Error::General("Column chunks not found in column metadata".to_string())
+            })?;
+            for chunk in chunks.iter() {
                 max_size = std::cmp::max(max_size, chunk.size_() as usize);
-            });
+            }
         }
     }
     Ok(max_size)
@@ -67,12 +69,17 @@ pub fn get_avg_io_unit_size<R: Reader + Clone>(reader: R, col_idx: usize) -> Res
     let mut total_count = 0;
     let rg_metas = footer.row_group_metadatas();
     for rg_meta in rg_metas {
-        let col_meta = rg_meta.column_metadatas.get(col_idx).unwrap();
-        col_meta.column_chunks().unwrap().iter().for_each(|chunk| {
-            // log::error!("chunk size: {}", chunk.size_());
+        let col_meta = rg_meta
+            .column_metadatas
+            .get(col_idx)
+            .ok_or_else(|| Error::IndexOutOfBound(col_idx, rg_meta.column_metadatas.len()))?;
+        let chunks = col_meta.column_chunks().ok_or_else(|| {
+            Error::General("Column chunks not found in column metadata".to_string())
+        })?;
+        for chunk in chunks.iter() {
             total_size += chunk.size_() as usize;
             total_count += 1;
-        });
+        }
     }
     Ok(total_size / total_count)
 }
@@ -165,7 +172,12 @@ impl<R: Reader> FileReaderV2<R> {
                 .collect(),
             self.schema.clone(),
         )?;
-        get_shared_dict_size_based_on_footer(footer, self.shared_dictionary_cache.as_ref().unwrap())
+        get_shared_dict_size_based_on_footer(
+            footer,
+            self.shared_dictionary_cache.as_ref().ok_or_else(|| {
+                Error::General("Shared dictionary cache is not initialized".to_string())
+            })?,
+        )
     }
 
     /// Access single row id from a leaf column from potentially nested data
@@ -225,7 +237,9 @@ fn read_file_based_on_footer<R: Reader>(
     shared_dictionary_cache: Option<&SharedDictionaryCache>,
     checksum_type: Option<ChecksumType>,
 ) -> Result<Vec<RecordBatch>> {
-    let shared_dictionary_cache = shared_dictionary_cache.unwrap();
+    let shared_dictionary_cache = shared_dictionary_cache.ok_or_else(|| {
+        Error::General("Shared dictionary cache is required but not provided".to_string())
+    })?;
     let mut record_batches = vec![];
     let rg_metas = footer.row_group_metadatas();
     // let projections = projections.map(|vec| vec.iter().map(|v| *v).collect::<HashSet<usize>>());
@@ -254,9 +268,15 @@ fn read_file_based_on_footer<R: Reader>(
         // TODO: needs some magic to handle nested data. Basically needs to go over the schema recursively
         // and figure out which leaf nodes to fetch. Currently projection is only tested on flat data.
         match projections {
-            Projection::LeafColumnIndexes(projected_indices) => projected_indices
-                .iter()
-                .try_for_each(|&v| decode_col(footer.schema().fields().get(v).unwrap()))?,
+            Projection::LeafColumnIndexes(projected_indices) => {
+                for &v in projected_indices.iter() {
+                    let field =
+                        footer.schema().fields().get(v).ok_or_else(|| {
+                            Error::IndexOutOfBound(v, footer.schema().fields().len())
+                        })?;
+                    decode_col(field)?;
+                }
+            }
             Projection::All => {
                 for field in footer.schema().fields().iter() {
                     // println!("decode col {field_id}");
@@ -296,18 +316,17 @@ fn get_shared_dict_size_based_on_footer(
     let chunk_sizes = shared_dictionary_cache.get_dict_chunk_sizes();
     let dict_ref_to_chunks = shared_dictionary_cache.get_dict_references();
     for rg_meta in rg_metas {
-        rg_meta
-            .column_metadatas
-            .iter()
-            .enumerate()
-            .for_each(|(field_id, column_meta)| {
-                for chunk in column_meta.column_chunks().unwrap().iter() {
-                    if let Some(shared_dict_id) = chunk.encoding_as_shared_dictionary() {
-                        let shared_dict_id = shared_dict_id.shared_dictionary_idx();
-                        referenced_dicts[field_id].insert(shared_dict_id);
-                    }
+        for (field_id, column_meta) in rg_meta.column_metadatas.iter().enumerate() {
+            let chunks = column_meta.column_chunks().ok_or_else(|| {
+                Error::General(format!("Column chunks not found for field {}", field_id))
+            })?;
+            for chunk in chunks.iter() {
+                if let Some(shared_dict_id) = chunk.encoding_as_shared_dictionary() {
+                    let shared_dict_id = shared_dict_id.shared_dictionary_idx();
+                    referenced_dicts[field_id].insert(shared_dict_id);
                 }
-            });
+            }
+        }
     }
     let mut chunk_referencing_cols =
         vec![std::collections::HashSet::<usize>::new(); chunk_sizes.len()];
@@ -327,19 +346,29 @@ fn get_shared_dict_size_based_on_footer(
     }
     let counters = referenced_dicts
         .iter()
-        .map(|set| EncodingCounter {
-            dict_type: crate::dict::DictionaryTypeOptions::GlobalDictionary,
-            dict_size: set
+        .map(|set| {
+            let dict_size: usize = set
                 .iter()
                 .map(|dict_idx| {
                     shared_dictionary_cache
                         .get_dict_size(*dict_idx as usize)
-                        .unwrap()
+                        .ok_or_else(|| {
+                            Error::General(format!(
+                                "Dictionary size not found for dict index {}",
+                                dict_idx
+                            ))
+                        })
                 })
-                .sum(),
-            index_size: 0,
+                .collect::<Result<Vec<usize>>>()?
+                .into_iter()
+                .sum();
+            Ok(EncodingCounter {
+                dict_type: crate::dict::DictionaryTypeOptions::GlobalDictionary,
+                dict_size,
+                index_size: 0,
+            })
         })
-        .collect();
+        .collect::<Result<Vec<EncodingCounter>>>()?;
     Ok((counters, sharing_peers))
 }
 
@@ -355,7 +384,9 @@ fn point_access_list_struct<R: Reader>(
     shared_dictionary_cache: Option<&SharedDictionaryCache>,
 ) -> Result<Vec<RecordBatch>> {
     let mut record_batches = vec![];
-    let shared_dictionary_cache = shared_dictionary_cache.unwrap();
+    let shared_dictionary_cache = shared_dictionary_cache.ok_or_else(|| {
+        Error::General("Shared dictionary cache is required but not provided".to_string())
+    })?;
     let rg_metas = footer.row_group_metadatas();
     // let projections = projections.map(|vec| vec.iter().map(|v| *v).collect::<HashSet<usize>>());
     for rg_meta in rg_metas {
@@ -371,29 +402,25 @@ fn point_access_list_struct<R: Reader>(
             shared_dictionary_cache,
         )?;
         let arrays = col_decoder.decode_batch_at_with_proj(col_leaf_id as usize, row_id, 1)?;
-        columns.push(
-            concat(
-                arrays
-                    .iter()
-                    .map(|a| a.as_ref())
-                    .collect::<Vec<_>>()
-                    .as_slice(),
-            )
-            .unwrap(),
-        );
+        let concatenated = concat(
+            arrays
+                .iter()
+                .map(|a| a.as_ref())
+                .collect::<Vec<_>>()
+                .as_slice(),
+        )
+        .map_err(|e| Error::General(format!("Failed to concatenate arrays: {e}")))?;
+        columns.push(concatenated);
         // TODO: vortex may not round-trip out the input Arrow type.
-        record_batches.push(
-            RecordBatch::try_new(
-                Schema::new(vec![Field::new_list_field(
-                    // FIXME:
-                    columns[0].data_type().clone(),
-                    columns[0].is_nullable(),
-                )])
-                .into(),
-                columns,
-            )
-            .unwrap(),
-        );
+        record_batches.push(RecordBatch::try_new(
+            Schema::new(vec![Field::new_list_field(
+                // FIXME:
+                columns[0].data_type().clone(),
+                columns[0].is_nullable(),
+            )])
+            .into(),
+            columns,
+        )?);
         // record_batches.push(RecordBatch::try_new(footer.schema().clone(), columns)?);
     }
     Ok(record_batches)
@@ -406,19 +433,26 @@ fn collect_stat_for_col(
     column_idx: &mut ColumnIndexSequence,
 ) -> Result<()> {
     let column_index = column_idx.next_column_index();
-    let column_meta = column_metas.get(column_index as usize).unwrap();
-    let chunk_size = column_meta.column_chunks().map(|chunks| {
-        chunks
-            .iter()
-            .map(|chunk| chunk.size_() as usize)
-            .sum::<usize>()
-    });
+    let column_meta = column_metas
+        .get(column_index as usize)
+        .ok_or_else(|| Error::IndexOutOfBound(column_index as usize, column_metas.len()))?;
+    let chunk_size = column_meta
+        .column_chunks()
+        .ok_or_else(|| {
+            Error::General(format!(
+                "Column chunks not found for column index {}",
+                column_index
+            ))
+        })?
+        .iter()
+        .map(|chunk| chunk.size_() as usize)
+        .sum::<usize>();
     println!(
         "Field: {}, Type: {}, id: {}, Column Size: {:?}",
         field.name(),
         field.data_type(),
         field_id,
-        chunk_size.unwrap()
+        chunk_size
     );
     match field.data_type() {
         non_nest_types!() => {}
@@ -430,7 +464,9 @@ fn collect_stat_for_col(
                 collect_stat_for_col(field.clone(), field_id, column_metas, column_idx)?;
             }
         }
-        _ => todo!("Implement logical encoding for field {}", field),
+        _ => {
+            return Err(Error::NYI(format!("Logical encoding for field {}", field)));
+        }
     }
     Ok(())
 }

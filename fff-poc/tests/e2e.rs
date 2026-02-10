@@ -82,6 +82,7 @@ fn test_read<R: Reader + Clone>(
     let mut reader = FileReaderV2Builder::new(file1)
         .with_projections(proj.clone())
         .with_selection(selection.clone())
+        .unwrap()
         .build()
         .unwrap();
     let output_batches = reader.read_file().unwrap();

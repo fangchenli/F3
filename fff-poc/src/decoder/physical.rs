@@ -53,17 +53,18 @@ impl<'a, R: Reader> NoDictColDecoder<'a, R> {
 
 impl<R: Reader> ChunkDecoder for NoDictColDecoder<'_, R> {
     fn decode_batch(&mut self) -> Result<Option<ArrayRef>> {
-        let encunit = self.encunit_iter.next();
-        if encunit.is_none() {
-            return Ok(None);
-        }
-        let encblock_fb = encunit.unwrap();
+        let encblock_fb = match self.encunit_iter.next() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         let data = self
             .encoded_chunk_buf
             .split_to(encblock_fb.size_() as usize);
         let decoder = create_encunit_decoder(
-            encblock_fb.encoding().unwrap(),
+            encblock_fb
+                .encoding()
+                .ok_or_else(|| general_error!("Missing encoding in EncUnit metadata"))?,
             encblock_fb.compression(),
             data.freeze(),
             encblock_fb.num_rows() as u64,
@@ -78,11 +79,10 @@ impl<R: Reader> ChunkDecoder for NoDictColDecoder<'_, R> {
         let mut remaining = len;
         let mut arrays = vec![];
         loop {
-            let encunit = self.encunit_iter.next();
-            if encunit.is_none() {
-                break;
-            }
-            let encblock_fb = encunit.unwrap();
+            let encblock_fb = match self.encunit_iter.next() {
+                Some(v) => v,
+                None => break,
+            };
             let last_cur = cur;
             let enc_unit_num_rows = encblock_fb.num_rows() as usize;
             cur += enc_unit_num_rows;
@@ -94,7 +94,9 @@ impl<R: Reader> ChunkDecoder for NoDictColDecoder<'_, R> {
                     .encoded_chunk_buf
                     .split_to(encblock_fb.size_() as usize);
                 let decoder = create_encunit_decoder(
-                    encblock_fb.encoding().unwrap(),
+                    encblock_fb
+                        .encoding()
+                        .ok_or_else(|| general_error!("Missing encoding in EncUnit metadata"))?,
                     encblock_fb.compression(),
                     data.freeze(),
                     enc_unit_num_rows as u64,
@@ -251,7 +253,10 @@ macro_rules! index_downcast {
 
 macro_rules! dict_index_to_data {
     ($downcast_type: ty, $dict: ident, $indices: ident) => {{
-        let dict_ref = $dict.as_any().downcast_ref::<$downcast_type>().unwrap();
+        let dict_ref = $dict
+            .as_any()
+            .downcast_ref::<$downcast_type>()
+            .ok_or_else(|| general_error!("Failed to downcast dictionary array"))?;
         let dict_len = dict_ref.len();
         if dict_len < (1 << 8) {
             index_downcast!($downcast_type, UInt8Array, dict_ref, $indices)
@@ -267,17 +272,18 @@ macro_rules! dict_index_to_data {
 
 impl<R: Reader> ChunkDecoder for DictColDecoder<'_, R> {
     fn decode_batch(&mut self) -> Result<Option<ArrayRef>> {
-        let dict_encunit = self.encunit_iter.next();
-        if dict_encunit.is_none() {
-            return Ok(None);
-        }
-        let dict_encblock_fb = dict_encunit.unwrap();
+        let dict_encblock_fb = match self.encunit_iter.next() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         let dict = self
             .encoded_chunk_buf
             .split_to(dict_encblock_fb.size_() as usize);
         let dict_decoder = create_encunit_decoder(
-            dict_encblock_fb.encoding().unwrap(),
+            dict_encblock_fb
+                .encoding()
+                .ok_or_else(|| general_error!("Missing encoding in dict EncUnit metadata"))?,
             dict_encblock_fb.compression(),
             dict.freeze(),
             dict_encblock_fb.num_rows() as u64,
@@ -289,17 +295,18 @@ impl<R: Reader> ChunkDecoder for DictColDecoder<'_, R> {
         } else {
             Arc::new(arrow_array::Int32Array::new_null(1))
         };
-        let index_encunit = self.encunit_iter.next();
-        if index_encunit.is_none() {
-            return nyi_err!("Index does not exists");
-        }
-        let index_encblock_fb = index_encunit.unwrap();
+        let index_encblock_fb = self
+            .encunit_iter
+            .next()
+            .ok_or_else(|| general_error!("Index EncUnit does not exist"))?;
 
         let indices = self
             .encoded_chunk_buf
             .split_to(index_encblock_fb.size_() as usize);
         let indices_decoder = create_encunit_decoder(
-            index_encblock_fb.encoding().unwrap(),
+            index_encblock_fb
+                .encoding()
+                .ok_or_else(|| general_error!("Missing encoding in index EncUnit metadata"))?,
             index_encblock_fb.compression(),
             indices.freeze(),
             index_encblock_fb.num_rows() as u64,
@@ -409,17 +416,18 @@ impl<'a, R: Reader> SharedDictColDecoder<'a, R> {
 
 impl<R: Reader> ChunkDecoder for SharedDictColDecoder<'_, R> {
     fn decode_batch(&mut self) -> Result<Option<ArrayRef>> {
-        let index_encunit = self.encunit_iter.next();
-        if index_encunit.is_none() {
-            return Ok(None);
-        }
-        let index_encblock_fb = index_encunit.unwrap();
+        let index_encblock_fb = match self.encunit_iter.next() {
+            Some(v) => v,
+            None => return Ok(None),
+        };
 
         let indices = self
             .encoded_chunk_buf
             .split_to(index_encblock_fb.size_() as usize);
         let indices_decoder = create_encunit_decoder(
-            index_encblock_fb.encoding().unwrap(),
+            index_encblock_fb
+                .encoding()
+                .ok_or_else(|| general_error!("Missing encoding in index EncUnit metadata"))?,
             index_encblock_fb.compression(),
             indices.freeze(),
             index_encblock_fb.num_rows() as u64,
@@ -509,7 +517,10 @@ pub fn create_physical_decoder<'a, R: Reader + 'a>(
                     wasm_context,
                 )))
             }
-            _ => todo!("Implement other data types"),
+            _ => Err(general_error!(format!(
+                "Unsupported data type for NoDictionary encoding: {:?}",
+                data_type
+            ))),
         }
     } else if dict_encoding_type == fb::DictionaryEncoding::LocalDictionary {
         match *data_type {
@@ -521,7 +532,10 @@ pub fn create_physical_decoder<'a, R: Reader + 'a>(
                     wasm_context,
                 )))
             }
-            _ => todo!("Implement other data types"),
+            _ => Err(general_error!(format!(
+                "Unsupported data type for LocalDictionary encoding: {:?}",
+                data_type
+            ))),
         }
     } else if dict_encoding_type == fb::DictionaryEncoding::SharedDictionary {
         match *data_type {
@@ -545,9 +559,15 @@ pub fn create_physical_decoder<'a, R: Reader + 'a>(
                         .ok_or_else(|| general_error!("Shared dictionary not found in cache"))?,
                 )))
             }
-            _ => todo!("Implement other data types"),
+            _ => Err(general_error!(format!(
+                "Unsupported data type for SharedDictionary encoding: {:?}",
+                data_type
+            ))),
         }
     } else {
-        todo!("Implement shared dict")
+        Err(general_error!(format!(
+            "Unsupported dictionary encoding type: {:?}",
+            dict_encoding_type
+        )))
     }
 }

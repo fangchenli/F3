@@ -50,24 +50,23 @@ pub struct WASMWritingContext {
     builtin_wasm_id: Option<WASMId>,
 }
 
-impl Default for WASMWritingContext {
-    fn default() -> Self {
+impl WASMWritingContext {
+    pub fn try_default() -> fff_core::errors::Result<Self> {
         // Built-in WASM decoder path is now configurable via FFF_BUILTIN_WASM_PATH env var
         let wasm_path = BUILTIN_WASM_PATH.as_path();
         debug!(?wasm_path, "Loading built-in WASM decoder");
 
-        let wasm_binary = match std::fs::read(wasm_path) {
-            Ok(data) => {
-                info!(path = ?wasm_path, size = data.len(), "Successfully loaded built-in WASM decoder");
-                data
-            }
-            Err(e) => {
-                error!(path = ?wasm_path, error = %e, "Failed to load built-in WASM decoder");
-                panic!("Failed to load WASM decoder: {}", e);
-            }
-        };
+        let wasm_binary = std::fs::read(wasm_path).map_err(|e| {
+            error!(path = ?wasm_path, error = %e, "Failed to load built-in WASM decoder");
+            fff_core::errors::Error::General(format!(
+                "Failed to load WASM decoder from {}: {}",
+                wasm_path.display(),
+                e
+            ))
+        })?;
+        info!(path = ?wasm_path, size = wasm_binary.len(), "Successfully loaded built-in WASM decoder");
 
-        Self {
+        Ok(Self {
             wasms: HashMap::from([(
                 WASMId(0),
                 WasmLib {
@@ -78,16 +77,14 @@ impl Default for WASMWritingContext {
             data_type_to_wasm_id: HashMap::default(),
             always_set_custom_wasm_for_built_in: false,
             builtin_wasm_id: Some(WASMId(0)),
-        }
+        })
     }
-}
 
-impl WASMWritingContext {
-    pub fn default_with_always_set_custom_wasm() -> Self {
-        Self {
+    pub fn default_with_always_set_custom_wasm() -> fff_core::errors::Result<Self> {
+        Ok(Self {
             always_set_custom_wasm_for_built_in: true,
-            ..Self::default()
-        }
+            ..Self::try_default()?
+        })
     }
 
     pub fn empty() -> Self {

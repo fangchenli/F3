@@ -25,10 +25,13 @@ pub(crate) static DEFAULT_ENCODING_VERSIONS: LazyLock<HashMap<fb::EncodingType, 
         HashMap::from([
             // (fb::EncodingType::PLAIN, Version::parse("0.1.0").unwrap()),
             // (fb::EncodingType::NULLABLE, Version::parse("0.1.0").unwrap()),
-            (fb::EncodingType::CASCADE, Version::parse("0.21.0").unwrap()),
+            (
+                fb::EncodingType::CASCADE,
+                Version::parse("0.21.0").expect("valid semver literal"),
+            ),
             (
                 fb::EncodingType::CUSTOM_WASM,
-                Version::parse("1.0.0").unwrap(),
+                Version::parse("1.0.0").expect("valid semver literal"),
             ),
         ])
     });
@@ -305,7 +308,10 @@ impl From<&fb::WASMEncoding<'_>> for WASMEncoding {
     fn from(fb: &fb::WASMEncoding) -> Self {
         Self {
             wasm_id: fb.wasm_id(),
-            mini_encunit_sizes: fb.mini_encunit_sizes().unwrap().into_iter().collect(),
+            mini_encunit_sizes: fb
+                .mini_encunit_sizes()
+                .map(|s| s.into_iter().collect())
+                .unwrap_or_default(),
         }
     }
 }
@@ -665,23 +671,23 @@ impl<'a> Footer<'a> {
             .iter()
             .zip(row_group_cnt_n_pointers)
             .map(
-                |(row_group_projected_col_bufs, row_group_cnt_n_pointer)| -> GroupedColumnMetadata {
+                |(row_group_projected_col_bufs, row_group_cnt_n_pointer)| -> Result<GroupedColumnMetadata> {
                     let column_metadatas: Vec<fb::ColumnMetadata> = row_group_projected_col_bufs
                         .iter()
                         .map(|buf| {
                             flatbuffers::root::<fff_format::File::fff::flatbuf::ColumnMetadata>(buf)
-                                .unwrap()
+                                .map_err(|e| Error::ParseError(format!("Invalid ColumnMetadata flatbuffer: {:?}", e)))
                         })
-                        .collect();
-                    GroupedColumnMetadata {
+                        .collect::<Result<Vec<_>>>()?;
+                    Ok(GroupedColumnMetadata {
                         column_metadatas,
                         row_count: row_group_cnt_n_pointer.row_count,
                         _offset: row_group_cnt_n_pointer._offset,
                         _size: row_group_cnt_n_pointer._size,
-                    }
+                    })
                 },
             )
-            .collect();
+            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             schema,
             row_group_metadatas: row_group_metadata,
@@ -709,35 +715,38 @@ impl<'a> Footer<'a> {
         let sizes = row_groups_pointer
             .sizes()
             .ok_or_else(|| Error::ParseError("Sizes not found".to_string()))?;
-        let row_group_metadata =
-            itertools::izip!(row_group_metadata_fbs, row_counts, offsets, sizes)
-                .map(
-                    |(row_group_meta_fbs, row_count, offset, size)| -> GroupedColumnMetadata {
-                        let column_metadatas: Vec<fb::ColumnMetadata> = row_group_meta_fbs
-                            .col_metadatas()
-                            .ok_or_else(|| {
-                                Error::ParseError("Column metadatas not found".to_string())
-                            })
-                            .unwrap()
-                            .into_iter()
-                            .map(|meta_section| {
-                                flatbuffers::root::<fff_format::File::fff::flatbuf::ColumnMetadata>(
-                                    &buf[meta_section.offset() as usize - data_size
-                                        ..meta_section.offset() as usize - data_size
-                                            + meta_section.size_() as usize],
-                                )
-                                .unwrap()
-                            })
-                            .collect();
-                        GroupedColumnMetadata {
-                            column_metadatas,
-                            row_count,
-                            _offset: offset,
-                            _size: size,
-                        }
-                    },
-                )
-                .collect();
+        let row_group_metadata = itertools::izip!(
+            row_group_metadata_fbs,
+            row_counts,
+            offsets,
+            sizes
+        )
+        .map(
+            |(row_group_meta_fbs, row_count, offset, size)| -> Result<GroupedColumnMetadata> {
+                let column_metadatas: Vec<fb::ColumnMetadata> = row_group_meta_fbs
+                    .col_metadatas()
+                    .ok_or_else(|| Error::ParseError("Column metadatas not found".to_string()))?
+                    .into_iter()
+                    .map(|meta_section| {
+                        flatbuffers::root::<fff_format::File::fff::flatbuf::ColumnMetadata>(
+                            &buf[meta_section.offset() as usize - data_size
+                                ..meta_section.offset() as usize - data_size
+                                    + meta_section.size_() as usize],
+                        )
+                        .map_err(|e| {
+                            Error::ParseError(format!("Invalid ColumnMetadata flatbuffer: {:?}", e))
+                        })
+                    })
+                    .collect::<Result<Vec<_>>>()?;
+                Ok(GroupedColumnMetadata {
+                    column_metadatas,
+                    row_count,
+                    _offset: offset,
+                    _size: size,
+                })
+            },
+        )
+        .collect::<Result<Vec<_>>>()?;
         // let row_groups = row_groups_pointer;
         Ok(Self {
             schema: schema.into(),
@@ -779,7 +788,9 @@ pub fn parse_footer<'a>(
         .header_as_schema()
         .ok_or_else(|| Error::ParseError("Unable to read IPC message as schema".to_string()))?;
     let schema = fb_to_schema(ipc_schema);
-    let logical_tree = footer_fbs.logical_tree().unwrap();
+    let logical_tree = footer_fbs
+        .logical_tree()
+        .ok_or_else(|| Error::ParseError("Logical tree not found in footer".to_string()))?;
     let shared_dict = footer_fbs.shared_dictionary_table();
     let row_groups_pointer = footer_fbs
         .row_groups()

@@ -99,7 +99,12 @@ impl<R: Reader> LogicalColDecoder for PrimitiveColDecoder<'_, R> {
                 self.wasm_context.as_ref().map(Arc::clone),
                 Some(self.shared_dictionary_cache),
             )?);
-            while let Some(array) = self.chunk_decoder.as_mut().unwrap().decode_batch()? {
+            while let Some(array) = self
+                .chunk_decoder
+                .as_mut()
+                .ok_or_else(|| general_error!("Chunk decoder not initialized"))?
+                .decode_batch()?
+            {
                 arrays.push(array);
             }
         }
@@ -148,7 +153,7 @@ impl<R: Reader> LogicalColDecoder for PrimitiveColDecoder<'_, R> {
             while let Some(array) = self
                 .chunk_decoder
                 .as_mut()
-                .unwrap()
+                .ok_or_else(|| general_error!("Chunk decoder not initialized"))?
                 .decode_row_at(row_id - cur_row, to_decode)?
             {
                 to_decode -= array.len();
@@ -205,14 +210,21 @@ impl<R: Reader> LogicalColDecoder for ListColDecoder<'_, R> {
                         nulls,
                     )) as Arc<dyn Array>);
                 }
-                _ => unreachable!(),
+                _ => {
+                    return Err(Error::General(format!(
+                        "Unexpected data type in ListColDecoder: {:?}",
+                        self.field.data_type()
+                    )));
+                }
             }
         }
         Ok(res)
     }
 
     fn decode_row_at(&mut self, _row_id: usize, _len: usize) -> Result<Vec<ArrayRef>> {
-        todo!()
+        Err(Error::General(
+            "Random access for ListColDecoder is not implemented yet".to_string(),
+        ))
     }
 }
 
@@ -341,11 +353,17 @@ impl<R: Reader> LogicalListStructNonNestedColDecoder for ListStructColDecoder<'_
                             nulls,
                         )) as Arc<dyn Array>);
                     }
-                    _ => unreachable!("wrong type in ListStructColDecoder"),
+                    _ => {
+                        return Err(Error::General(
+                            "Expected Struct child type in ListStructColDecoder".to_string(),
+                        ));
+                    }
                 }
             }
             DataType::LargeList(_child) => {
-                todo!();
+                return Err(Error::General(
+                    "LargeList support in ListStructColDecoder is not implemented yet".to_string(),
+                ));
                 // let offsets: ScalarBuffer<i64> =
                 //     v_o.as_list::<i64>().to_data().buffers()[0].clone().into();
                 // let offsets = OffsetBuffer::new(offsets);
@@ -355,7 +373,12 @@ impl<R: Reader> LogicalListStructNonNestedColDecoder for ListStructColDecoder<'_
                 //         as Arc<dyn Array>,
                 // );
             }
-            _ => unreachable!(),
+            _ => {
+                return Err(Error::General(format!(
+                    "Unexpected data type in ListStructColDecoder: {:?}",
+                    self.field.data_type()
+                )));
+            }
         }
         Ok(res)
     }
@@ -376,20 +399,30 @@ impl<R: Reader> LogicalColDecoder for StructColDecoder<'_, R> {
             .iter_mut()
             .map(|c| c.decode_batch())
             .collect::<Result<Vec<_>>>()?;
-        fn transpose<T>(v: Vec<Vec<T>>) -> Vec<Vec<T>> {
-            assert!(!v.is_empty());
+        fn transpose<T>(v: Vec<Vec<T>>) -> Result<Vec<Vec<T>>> {
+            if v.is_empty() {
+                return Err(Error::General(
+                    "Cannot transpose empty children vector".to_string(),
+                ));
+            }
             let len = v[0].len();
             let mut iters: Vec<_> = v.into_iter().map(|n| n.into_iter()).collect();
             (0..len)
                 .map(|_| {
                     iters
                         .iter_mut()
-                        .map(|n| n.next().unwrap())
-                        .collect::<Vec<T>>()
+                        .map(|n| {
+                            n.next().ok_or_else(|| {
+                                Error::General(
+                                    "Mismatched children lengths during transpose".to_string(),
+                                )
+                            })
+                        })
+                        .collect::<Result<Vec<T>>>()
                 })
-                .collect()
+                .collect::<Result<Vec<Vec<T>>>>()
         }
-        let children = transpose(children);
+        let children = transpose(children)?;
 
         let res: Vec<ArrayRef> = validity
             .into_iter()
@@ -417,7 +450,9 @@ impl<R: Reader> LogicalColDecoder for StructColDecoder<'_, R> {
     }
 
     fn decode_row_at(&mut self, _row_id: usize, _len: usize) -> Result<Vec<ArrayRef>> {
-        todo!()
+        Err(Error::General(
+            "Random access for StructColDecoder is not implemented yet".to_string(),
+        ))
     }
 }
 
@@ -432,7 +467,12 @@ pub fn create_list_struct_decoder<'a, R: Reader>(
     shared_dictionary_cache: &'a SharedDictionaryCache,
 ) -> Result<Box<dyn LogicalListStructNonNestedColDecoder + 'a>> {
     let mut column_index = column_idx.next_column_index();
-    let mut column_meta = column_metas.get(column_index as usize).unwrap();
+    let mut column_meta = column_metas.get(column_index as usize).ok_or_else(|| {
+        Error::General(format!(
+            "Column index {} out of bounds in column metadata",
+            column_index
+        ))
+    })?;
     let mut chunks_meta_iter = column_meta
         .column_chunks()
         .ok_or_else(|| Error::General("No chunks in column meta".to_string()))?
@@ -473,7 +513,12 @@ pub fn create_list_struct_decoder<'a, R: Reader>(
                                             )
                                             .into(),
                                         ),
-                                        _ => unreachable!(),
+                                        other => {
+                                            return Err(Error::General(format!(
+                                                "Unexpected data type in list struct decoder: {:?}",
+                                                other
+                                            )));
+                                        }
                                     }
                                 },
                                 wasm_context: wasm_context.as_ref().map(Arc::clone),
@@ -485,7 +530,13 @@ pub fn create_list_struct_decoder<'a, R: Reader>(
                                 break;
                             }
                             column_index = column_idx.next_column_index();
-                            column_meta = column_metas.get(column_index as usize).unwrap();
+                            column_meta =
+                                column_metas.get(column_index as usize).ok_or_else(|| {
+                                    Error::General(format!(
+                                        "Column index {} out of bounds in column metadata",
+                                        column_index
+                                    ))
+                                })?;
                             chunks_meta_iter = column_meta
                                 .column_chunks()
                                 .ok_or_else(|| {
@@ -515,7 +566,14 @@ pub fn create_list_struct_decoder<'a, R: Reader>(
                                 chunk_decoder: None,
                                 chunks_meta_iter: {
                                     column_index = column_idx.next_column_index();
-                                    column_meta = column_metas.get(column_index as usize).unwrap();
+                                    column_meta = column_metas
+                                        .get(column_index as usize)
+                                        .ok_or_else(|| {
+                                            Error::General(format!(
+                                                "Column index {} out of bounds in column metadata",
+                                                column_index
+                                            ))
+                                        })?;
                                     let chunks_meta_iter = column_meta
                                         .column_chunks()
                                         .ok_or_else(|| {
@@ -531,37 +589,46 @@ pub fn create_list_struct_decoder<'a, R: Reader>(
                             },
                             children: fields
                                 .iter()
-                                .map(|f| PrimitiveColDecoder {
-                                    r,
-                                    chunk_decoder: None,
-                                    chunks_meta_iter: {
-                                        column_index = column_idx.next_column_index();
-                                        column_meta =
-                                            column_metas.get(column_index as usize).unwrap();
-                                        let chunks_meta_iter = column_meta
-                                            .column_chunks()
-                                            .ok_or_else(|| {
-                                                Error::General(
-                                                    "No chunks in column meta".to_string(),
-                                                )
-                                            })
-                                            .unwrap()
-                                            .iter();
-                                        chunks_meta_iter
-                                    },
-                                    primitive_type: f.data_type().clone(),
-                                    wasm_context: wasm_context.as_ref().map(Arc::clone),
-                                    shared_dictionary_cache,
-                                    checksum_type: None,
+                                .map(|f| {
+                                    column_index = column_idx.next_column_index();
+                                    column_meta = column_metas
+                                        .get(column_index as usize)
+                                        .ok_or_else(|| {
+                                            Error::General(format!(
+                                                "Column index {} out of bounds in column metadata",
+                                                column_index
+                                            ))
+                                        })?;
+                                    let chunks_meta_iter = column_meta
+                                        .column_chunks()
+                                        .ok_or_else(|| {
+                                            Error::General("No chunks in column meta".to_string())
+                                        })?
+                                        .iter();
+                                    Ok(PrimitiveColDecoder {
+                                        r,
+                                        chunk_decoder: None,
+                                        chunks_meta_iter,
+                                        primitive_type: f.data_type().clone(),
+                                        wasm_context: wasm_context.as_ref().map(Arc::clone),
+                                        shared_dictionary_cache,
+                                        checksum_type: None,
+                                    })
                                 })
-                                .collect(),
+                                .collect::<Result<Vec<_>>>()?,
                         },
                     }))
                 }
             }
-            _ => panic!("wrong type in create_list_struct_decoder"),
+            _ => Err(Error::General(format!(
+                "Unsupported child type in create_list_struct_decoder: {:?}",
+                child.data_type()
+            ))),
         },
-        _ => panic!("wrong type in create_list_struct_decoder"),
+        _ => Err(Error::General(format!(
+            "Unsupported field type in create_list_struct_decoder: {:?}",
+            field.data_type()
+        ))),
     }
 }
 
@@ -604,7 +671,12 @@ pub fn create_logical_decoder<'a, R: Reader>(
     //     _ => (),
     // }
     let column_index = column_idx.next_column_index();
-    let column_meta = column_metas.get(column_index as usize).unwrap();
+    let column_meta = column_metas.get(column_index as usize).ok_or_else(|| {
+        Error::General(format!(
+            "Column index {} out of bounds in column metadata",
+            column_index
+        ))
+    })?;
     let chunks_meta_iter = column_meta
         .column_chunks()
         .ok_or_else(|| Error::General("No chunks in column meta".to_string()))?
@@ -673,7 +745,10 @@ pub fn create_logical_decoder<'a, R: Reader>(
                 })
                 .collect::<Result<Vec<_>>>()?,
         })),
-        _ => todo!("Implement logical encoding for field {}", field),
+        _ => Err(Error::General(format!(
+            "Unsupported logical encoding for field: {}",
+            field
+        ))),
     }
 }
 
@@ -687,10 +762,14 @@ pub fn advance_column_index(field: FieldRef, column_idx: &mut ColumnIndexSequenc
             let _column_index = column_idx.next_column_index();
             Ok(())
         }
-        DataType::Struct(_child_fields) => {
-            todo!("Implement logical decoding for field {}", field)
-        }
-        _ => todo!("Implement logical encoding for field {}", field),
+        DataType::Struct(_child_fields) => Err(Error::General(format!(
+            "Logical decoding for Struct field not implemented: {}",
+            field
+        ))),
+        _ => Err(Error::General(format!(
+            "Unsupported logical encoding for field: {}",
+            field
+        ))),
     }
 }
 

@@ -33,8 +33,13 @@ use vortex_sampling_compressor::{CompressConfig, SamplingCompressor, DEFAULT_COM
 use vortex_scalar::Scalar;
 const VORTEX_ALIGNMENT: usize = 64;
 
-fn vortex_array_to_arrow(vortex: ArrayData) -> ArrayRef {
-    vortex.into_canonical().unwrap().into_arrow().unwrap()
+fn vortex_array_to_arrow(vortex: ArrayData) -> Result<ArrayRef> {
+    let canonical = vortex
+        .into_canonical()
+        .map_err(|e| Error::External(e.into()))?;
+    canonical
+        .into_arrow()
+        .map_err(|e| Error::External(e.into()))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -122,45 +127,7 @@ impl VortexEncoder {
             arr.data_type(),
             DataType::List(_) | DataType::LargeList(_)
         ));
-        let (validity, offsets) = match arr.data_type() {
-            DataType::List(_) => {
-                let list_array = arr
-                    .as_any()
-                    .downcast_ref::<arrow_array::ListArray>()
-                    .unwrap();
-                let validity = Arc::new(BooleanArray::new(
-                    list_array.nulls().map_or_else(
-                        // TODO: reuse all-true boolean buffer using lazy static
-                        || BooleanBuffer::new_set(list_array.len()),
-                        |v| v.clone().into_inner(),
-                    ),
-                    None,
-                )) as Arc<dyn Array>;
-                let offsets = list_array.offsets().clone().into_inner();
-                let offsets =
-                    Arc::new(PrimitiveArray::<Int32Type>::new(offsets, None)) as Arc<dyn Array>;
-                (validity, offsets)
-            }
-            DataType::LargeList(_) => {
-                let list_array = arr
-                    .as_any()
-                    .downcast_ref::<arrow_array::LargeListArray>()
-                    .unwrap();
-                let validity = Arc::new(BooleanArray::new(
-                    list_array.nulls().map_or_else(
-                        // TODO: reuse all-true boolean buffer using lazy static
-                        || BooleanBuffer::new_set(list_array.len()),
-                        |v| v.clone().into_inner(),
-                    ),
-                    None,
-                )) as Arc<dyn Array>;
-                let offsets = list_array.offsets().clone().into_inner();
-                let offsets =
-                    Arc::new(PrimitiveArray::<Int64Type>::new(offsets, None)) as Arc<dyn Array>;
-                (validity, offsets)
-            }
-            _ => panic!("wrong type in list_encode"),
-        };
+        let (validity, offsets) = extract_list_validity_offsets(&arr)?;
 
         Ok(EncUnit::new(
             {
@@ -178,45 +145,7 @@ impl VortexEncoder {
             list_arr.data_type(),
             DataType::List(_) | DataType::LargeList(_)
         ));
-        let (validity, offsets) = match list_arr.data_type() {
-            DataType::List(_) => {
-                let list_array = list_arr
-                    .as_any()
-                    .downcast_ref::<arrow_array::ListArray>()
-                    .unwrap();
-                let validity = Arc::new(BooleanArray::new(
-                    list_array.nulls().map_or_else(
-                        // TODO: reuse all-true boolean buffer using lazy static
-                        || BooleanBuffer::new_set(list_array.len()),
-                        |v| v.clone().into_inner(),
-                    ),
-                    None,
-                )) as Arc<dyn Array>;
-                let offsets = list_array.offsets().clone().into_inner();
-                let offsets =
-                    Arc::new(PrimitiveArray::<Int32Type>::new(offsets, None)) as Arc<dyn Array>;
-                (validity, offsets)
-            }
-            DataType::LargeList(_) => {
-                let list_array = list_arr
-                    .as_any()
-                    .downcast_ref::<arrow_array::LargeListArray>()
-                    .unwrap();
-                let validity = Arc::new(BooleanArray::new(
-                    list_array.nulls().map_or_else(
-                        // TODO: reuse all-true boolean buffer using lazy static
-                        || BooleanBuffer::new_set(list_array.len()),
-                        |v| v.clone().into_inner(),
-                    ),
-                    None,
-                )) as Arc<dyn Array>;
-                let offsets = list_array.offsets().clone().into_inner();
-                let offsets =
-                    Arc::new(PrimitiveArray::<Int64Type>::new(offsets, None)) as Arc<dyn Array>;
-                (validity, offsets)
-            }
-            _ => panic!("wrong type in list_encode"),
-        };
+        let (validity, offsets) = extract_list_validity_offsets(&list_arr)?;
 
         Ok(EncUnit::new(
             {
@@ -231,12 +160,61 @@ impl VortexEncoder {
     }
 }
 
+/// Extract validity and offsets from a List or LargeList array.
+fn extract_list_validity_offsets(arr: &ArrayRef) -> Result<(Arc<dyn Array>, Arc<dyn Array>)> {
+    match arr.data_type() {
+        DataType::List(_) => {
+            let list_array = arr
+                .as_any()
+                .downcast_ref::<arrow_array::ListArray>()
+                .ok_or_else(|| Error::General("Failed to downcast to ListArray".to_string()))?;
+            let validity = Arc::new(BooleanArray::new(
+                list_array.nulls().map_or_else(
+                    || BooleanBuffer::new_set(list_array.len()),
+                    |v| v.clone().into_inner(),
+                ),
+                None,
+            )) as Arc<dyn Array>;
+            let offsets = list_array.offsets().clone().into_inner();
+            let offsets =
+                Arc::new(PrimitiveArray::<Int32Type>::new(offsets, None)) as Arc<dyn Array>;
+            Ok((validity, offsets))
+        }
+        DataType::LargeList(_) => {
+            let list_array = arr
+                .as_any()
+                .downcast_ref::<arrow_array::LargeListArray>()
+                .ok_or_else(|| {
+                    Error::General("Failed to downcast to LargeListArray".to_string())
+                })?;
+            let validity = Arc::new(BooleanArray::new(
+                list_array.nulls().map_or_else(
+                    || BooleanBuffer::new_set(list_array.len()),
+                    |v| v.clone().into_inner(),
+                ),
+                None,
+            )) as Arc<dyn Array>;
+            let offsets = list_array.offsets().clone().into_inner();
+            let offsets =
+                Arc::new(PrimitiveArray::<Int64Type>::new(offsets, None)) as Arc<dyn Array>;
+            Ok((validity, offsets))
+        }
+        other => Err(Error::General(format!(
+            "Expected List or LargeList type in list_encode, got {:?}",
+            other
+        ))),
+    }
+}
+
 impl Encoder for VortexEncoder {
     fn encode(&self, arr: ArrayRef) -> Result<EncUnit> {
         match arr.data_type() {
             non_nest_types!() => self.regular_encode(arr),
             DataType::List(_) | DataType::LargeList(_) => self.list_encode(arr),
-            _ => unimplemented!("Vortex encoding for this type"),
+            other => Err(Error::General(format!(
+                "Vortex encoding not implemented for type {:?}",
+                other
+            ))),
         }
     }
     fn encoding_type(&self) -> Encoding {
@@ -292,16 +270,24 @@ impl VortexDecoderBuilder {
         }
     }
 
-    pub fn with_partial_decode(mut self, partial_decode: bool) -> Self {
-        assert!(self.ppd.is_none());
+    pub fn with_partial_decode(mut self, partial_decode: bool) -> Result<Self> {
+        if self.ppd.is_some() {
+            return Err(Error::General(
+                "Cannot set partial_decode when PPD is already set".to_string(),
+            ));
+        }
         self.partial_decode = partial_decode;
-        self
+        Ok(self)
     }
 
-    pub fn with_ppd(mut self, ppd: VtxPPD) -> Self {
-        assert!(!self.partial_decode);
+    pub fn with_ppd(mut self, ppd: VtxPPD) -> Result<Self> {
+        if self.partial_decode {
+            return Err(Error::General(
+                "Cannot set PPD when partial_decode is already enabled".to_string(),
+            ));
+        }
         self.ppd = Some(ppd);
-        self
+        Ok(self)
     }
 
     pub fn try_build(mut self) -> Result<VortexDecoder> {
@@ -327,7 +313,9 @@ impl VortexDecoderBuilder {
                 vortex_array: Some(vortex_deser(&mut self.encunit, self.context)?),
                 partial_decode: false,
             }),
-            _ => panic!("Cannot have partial decode and PPD at the same time"),
+            (true, Some(_)) => Err(Error::General(
+                "Cannot have partial decode and PPD at the same time".to_string(),
+            )),
         }
     }
 }
@@ -345,13 +333,20 @@ impl VortexDecoder {
     }
 }
 
+/// Helper to take an Option<ArrayData>, returning an error if None.
+fn take_vortex_array(arr: &mut Option<ArrayData>, context: &str) -> Result<ArrayData> {
+    arr.take()
+        .ok_or_else(|| Error::General(format!("Vortex array already consumed in {}", context)))
+}
+
 impl Decoder for VortexDecoder {
     fn decode_all(&mut self) -> Result<Vec<Buffer>> {
         if self.vortex_array.is_none() {
             return Ok(vec![]);
         }
         let mut res = Vec::new();
-        let arrow_array = vortex_array_to_arrow(self.vortex_array.take().unwrap());
+        let arrow_array =
+            vortex_array_to_arrow(take_vortex_array(&mut self.vortex_array, "decode_all")?)?;
         if let Some(b) = arrow_array.nulls() {
             res.push(b.buffer().clone());
         }
@@ -362,71 +357,85 @@ impl Decoder for VortexDecoder {
     }
 
     fn slice(&mut self, start: usize, stop: usize) -> Result<ArrayRef> {
-        // let arrow_array = vortex_array_to_arrow(vortex_array::compute::slice(
-        //     self.vortex_array.take().unwrap(),
-        //     start,
-        //     stop,
-        // )?);
-        let arr = self.vortex_array.take().unwrap();
+        let arr = take_vortex_array(&mut self.vortex_array, "slice")?;
         let mask = vortex_array::compute::FilterMask::from_indices(arr.len(), start..stop);
         let arr = vortex_array::compute::filter(&arr, mask)
             .and_then(IntoCanonical::into_canonical)
             .map(ArrayData::from)?;
-        let arrow_array = arr.into_arrow().unwrap();
+        let arrow_array = arr.into_arrow().map_err(|e| Error::External(e.into()))?;
         Ok(arrow_array)
     }
 
     fn decode_all_as_array(&mut self) -> Result<ArrayRef> {
         if self.partial_decode {
-            let arr = self.vortex_array.take().unwrap();
+            let arr = take_vortex_array(&mut self.vortex_array, "decode_all_as_array")?;
             if arr.is_encoding(vortex_runend::RunEndEncoding::ID) {
-                todo!();
+                return Err(Error::General(
+                    "RunEnd partial decoding not yet implemented".to_string(),
+                ));
             } else if arr.is_encoding(vortex_dict::DictEncoding::ID) {
                 // Preserve dictionary encoding
                 let mut children = arr.children();
-                assert!(children.len() == 2);
+                if children.len() != 2 {
+                    return Err(Error::General(format!(
+                        "Expected 2 children for DictEncoding, got {}",
+                        children.len()
+                    )));
+                }
                 let codes = children
                     .remove(0)
                     .into_canonical()
-                    .unwrap()
+                    .map_err(|e| Error::External(e.into()))?
                     .into_arrow()
-                    .unwrap();
+                    .map_err(|e| Error::External(e.into()))?;
                 let codes = codes.as_ref();
                 let codes_dtype = codes.data_type();
                 let values = children
                     .remove(0)
                     .into_canonical()
-                    .unwrap()
+                    .map_err(|e| Error::External(e.into()))?
                     .into_arrow()
-                    .unwrap();
+                    .map_err(|e| Error::External(e.into()))?;
                 let out = downcast_integer! {
                     codes_dtype => (downcast_primitive_array_helper, codes, {Arc::new(DictionaryArray::try_new(codes.clone(), values)?) as ArrayRef}),
-                    _ => panic!("wrong type in dictionary codes")
+                    _ => {return Err(Error::General(format!(
+                        "Unsupported dictionary codes type: {:?}",
+                        codes_dtype
+                    )))}
                 };
 
                 Ok(out)
             } else {
-                unimplemented!("Partial decoding for this encoding")
+                Err(Error::General(format!(
+                    "Partial decoding not implemented for encoding {:?}",
+                    arr.encoding().id()
+                )))
             }
         } else {
-            Ok(vortex_array_to_arrow(self.vortex_array.take().unwrap()))
+            vortex_array_to_arrow(take_vortex_array(
+                &mut self.vortex_array,
+                "decode_all_as_array",
+            )?)
         }
     }
 
     /// FIXME: decode_a_vector should be redesigned to be indexing based. Or just like slice.
     fn decode_a_vector(&mut self) -> Result<Option<Vec<Buffer>>> {
-        Ok(self.vortex_array.as_ref().map(|arr| {
-            let arr = slice(arr, 0, 1024).expect("Slice failed");
-            let mut res = Vec::new();
-            let arrow_array = vortex_array_to_arrow(arr);
-            if let Some(b) = arrow_array.nulls() {
-                res.push(b.buffer().clone());
+        match self.vortex_array.as_ref() {
+            None => Ok(None),
+            Some(arr) => {
+                let arr = slice(arr, 0, 1024)?;
+                let mut res = Vec::new();
+                let arrow_array = vortex_array_to_arrow(arr)?;
+                if let Some(b) = arrow_array.nulls() {
+                    res.push(b.buffer().clone());
+                }
+                for b in arrow_array.to_data().buffers() {
+                    res.push(b.clone());
+                }
+                Ok(Some(res))
             }
-            for b in arrow_array.to_data().buffers() {
-                res.push(b.clone());
-            }
-            res
-        }))
+        }
     }
 }
 
@@ -453,15 +462,23 @@ impl VortexListDecoder {
 
 impl Decoder for VortexListDecoder {
     fn decode_all_as_array(&mut self) -> Result<ArrayRef> {
-        let validity_array = vortex_array_to_arrow(self.vortex_validity_array.take().unwrap());
+        let validity_array = vortex_array_to_arrow(take_vortex_array(
+            &mut self.vortex_validity_array,
+            "VortexListDecoder::decode_all_as_array (validity)",
+        )?)?;
         let validity = validity_array
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .unwrap()
+            .ok_or_else(|| {
+                Error::General("Failed to downcast validity to BooleanArray".to_string())
+            })?
             .values()
             .inner()
             .clone();
-        let offsets_array = vortex_array_to_arrow(self.vortex_offsets_array.take().unwrap());
+        let offsets_array = vortex_array_to_arrow(take_vortex_array(
+            &mut self.vortex_offsets_array,
+            "VortexListDecoder::decode_all_as_array (offsets)",
+        )?)?;
         let offsets = offsets_array.into_data().buffers()[0].clone();
         // .as_any()
         // .downcast_ref::<PrimitiveArray<Int32Type>>()
@@ -511,57 +528,82 @@ impl VortexListStructDecoder {
 
 impl Decoder for VortexListStructDecoder {
     fn slice(&mut self, start: usize, stop: usize) -> Result<ArrayRef> {
-        let validity_array = vortex_array_to_arrow(vortex_array::compute::slice(
-            self.vortex_validity_array.take().unwrap(),
-            start,
-            stop,
-        )?);
+        if stop - start != 1 {
+            return Err(Error::General(format!(
+                "VortexListStructDecoder::slice only supports single-row random access, got range {}..{}",
+                start, stop
+            )));
+        }
+        let validity_arr = take_vortex_array(
+            &mut self.vortex_validity_array,
+            "VortexListStructDecoder::slice (validity)",
+        )?;
+        let validity_array =
+            vortex_array_to_arrow(vortex_array::compute::slice(&validity_arr, start, stop)?)?;
         let validity = validity_array
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .unwrap()
+            .ok_or_else(|| {
+                Error::General("Failed to downcast validity to BooleanArray".to_string())
+            })?
             .values()
             .inner()
             .clone();
-        let offsets_array = vortex_array_to_arrow(vortex_array::compute::slice(
-            self.vortex_offsets_array.take().unwrap(),
-            start,
-            stop + 1,
-        )?);
-        assert!((stop - start) == 1, "only supports random access now");
+        let offsets_arr = take_vortex_array(
+            &mut self.vortex_offsets_array,
+            "VortexListStructDecoder::slice (offsets)",
+        )?;
+        let offsets_array =
+            vortex_array_to_arrow(vortex_array::compute::slice(&offsets_arr, start, stop + 1)?)?;
         let offsets = offsets_array.as_primitive::<Int32Type>();
+        let struct_arr = take_vortex_array(
+            &mut self.vortex_struct_array,
+            "VortexListStructDecoder::slice (struct)",
+        )?;
         let struct_array = vortex_array_to_arrow(vortex_array::compute::slice(
-            self.vortex_struct_array.take().unwrap(),
+            &struct_arr,
             offsets.value(0) as usize,
             offsets.value(1) as usize,
-        )?);
+        )?)?;
         let offsets: Vec<i32> = vec![0, offsets.value(1) - offsets.value(0)];
         let offsets = Buffer::from_vec(offsets);
-        // let offsets = offsets_array.into_data().buffers()[0].clone();
         match self.out_type {
             DataType::List(_) => new_list_offsets_validity_from_buffers::<Int32Type>(
                 vec![validity, offsets],
                 validity_array.len() as u64,
                 Some(struct_array),
             ),
-            DataType::LargeList(_) => unimplemented!(),
-            _ => Err(fff_core::errors::Error::General(
-                "wrong type in VortexListDecoder".to_string(),
+            DataType::LargeList(_) => Err(Error::General(
+                "LargeList slice not yet implemented for VortexListStructDecoder".to_string(),
+            )),
+            _ => Err(Error::General(
+                "wrong type in VortexListStructDecoder".to_string(),
             )),
         }
     }
 
     fn decode_all_as_array(&mut self) -> Result<ArrayRef> {
-        let validity_array = vortex_array_to_arrow(self.vortex_validity_array.take().unwrap());
+        let validity_array = vortex_array_to_arrow(take_vortex_array(
+            &mut self.vortex_validity_array,
+            "VortexListStructDecoder::decode_all_as_array (validity)",
+        )?)?;
         let validity = validity_array
             .as_any()
             .downcast_ref::<BooleanArray>()
-            .unwrap()
+            .ok_or_else(|| {
+                Error::General("Failed to downcast validity to BooleanArray".to_string())
+            })?
             .values()
             .inner()
             .clone();
-        let offsets_array = vortex_array_to_arrow(self.vortex_offsets_array.take().unwrap());
-        let struct_array = vortex_array_to_arrow(self.vortex_struct_array.take().unwrap());
+        let offsets_array = vortex_array_to_arrow(take_vortex_array(
+            &mut self.vortex_offsets_array,
+            "VortexListStructDecoder::decode_all_as_array (offsets)",
+        )?)?;
+        let struct_array = vortex_array_to_arrow(take_vortex_array(
+            &mut self.vortex_struct_array,
+            "VortexListStructDecoder::decode_all_as_array (struct)",
+        )?)?;
         let offsets = offsets_array.into_data().buffers()[0].clone();
         match self.out_type {
             DataType::List(_) => new_list_offsets_validity_from_buffers::<Int32Type>(

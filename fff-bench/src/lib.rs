@@ -143,6 +143,7 @@ pub fn read_fff(pathbuf: PathBuf, opt: ReadFFFOpt) -> Result<Vec<RecordBatch>> {
         let mut reader = FileReaderV2Builder::new(Arc::new(f1))
             .with_projections(opt.projections.clone().unwrap_or_default())
             .with_selection(opt.selection.clone().unwrap_or_default())
+            .unwrap()
             .build()
             .unwrap();
         Ok(reader.read_file().unwrap())
@@ -152,6 +153,7 @@ pub fn read_fff(pathbuf: PathBuf, opt: ReadFFFOpt) -> Result<Vec<RecordBatch>> {
         let mut reader = FileReaderV2Builder::new(Arc::new(f1))
             .with_projections(opt.projections.clone().unwrap_or_default())
             .with_selection(opt.selection.clone().unwrap_or_default())
+            .unwrap()
             .build()
             .unwrap();
         Ok(reader.read_file().unwrap())

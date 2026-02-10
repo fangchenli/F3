@@ -48,6 +48,7 @@ fn corrupted_iounit() {
     let mut reader = FileReaderV2Builder::new(temp_file)
         .with_verify_io_unit_checksum(true)
         .with_selection(Selection::RowIndexes(vec![5]))
+        .unwrap()
         .build()
         .unwrap();
     assert!(matches!(
@@ -67,6 +68,7 @@ fn corrupted_flatbuffer() {
 
     let reader = FileReaderV2Builder::new(temp_file)
         .with_selection(Selection::RowIndexes(vec![5]))
+        .unwrap()
         .build();
     println!("{}", reader.as_ref().err().unwrap());
     assert!(matches!(
@@ -87,6 +89,7 @@ fn verify_file_checksum() {
     let reader = FileReaderV2Builder::new(temp_file)
         .with_verify_file_checksum(true)
         .with_selection(Selection::RowIndexes(vec![5]))
+        .unwrap()
         .build();
     assert!(matches!(
         reader,
@@ -142,6 +145,7 @@ fn fuzz_test() {
         let reader_result = FileReaderV2Builder::new(corrupted_file.clone())
             .with_verify_io_unit_checksum(true)
             .with_selection(Selection::RowIndexes(vec![5]))
+            .unwrap()
             .build();
 
         match reader_result {
