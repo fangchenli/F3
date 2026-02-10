@@ -93,6 +93,10 @@ criterion = { version = "0.5.1", features = ["html_reports"] }
 lazy_static = "1.4.0"
 byteorder = "1.5.0"
 
+# logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt", "ansi"] }
+
 # vortex 
 vortex-error = { git = "https://github.com/XinyuZeng/vortex.git", rev = "c0d89a66cbaa542bd9aa277cfdf52f2728c4b37a" }
 vortex-array = { git = "https://github.com/XinyuZeng/vortex.git", rev = "c0d89a66cbaa542bd9aa277cfdf52f2728c4b37a" }

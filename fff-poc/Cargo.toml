@@ -32,6 +32,8 @@ xxhash-rust = { version = "0.8.10", features = ["xxh64"] }
 bytes.workspace = true
 snafu = { workspace = true }
 log = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 byteorder = { workspace = true }
 object_store = { workspace = true }
 futures = { workspace = true }

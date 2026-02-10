@@ -257,7 +257,7 @@ pub fn create_encunit_decoder<R: Reader>(
                         Error::General("not provided custom WASM in the file".to_string())
                     })?
                     .wasm_id(),
-            )),
+            ))?,
             WASM_FUNC_GENERAL, // FIXME: should get from wasm binary
             output_type,
             num_rows,

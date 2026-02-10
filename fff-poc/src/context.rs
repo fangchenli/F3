@@ -6,6 +6,7 @@ use std::{
 };
 
 use arrow_schema::DataType;
+use tracing::{debug, error, info, instrument, warn};
 use fff_format::File::fff::flatbuf as fb;
 use fff_test_util::BUILTIN_WASM_PATH;
 use fff_ude_wasm::Runtime;
@@ -51,13 +52,27 @@ pub struct WASMWritingContext {
 
 impl Default for WASMWritingContext {
     fn default() -> Self {
+        // Built-in WASM decoder path is now configurable via FFF_BUILTIN_WASM_PATH env var
+        let wasm_path = BUILTIN_WASM_PATH.as_path();
+        debug!(?wasm_path, "Loading built-in WASM decoder");
+
+        let wasm_binary = match std::fs::read(wasm_path) {
+            Ok(data) => {
+                info!(path = ?wasm_path, size = data.len(), "Successfully loaded built-in WASM decoder");
+                data
+            }
+            Err(e) => {
+                error!(path = ?wasm_path, error = %e, "Failed to load built-in WASM decoder");
+                panic!("Failed to load WASM decoder: {}", e);
+            }
+        };
+
         Self {
-            // Built-in WASM decoder path is now configurable via FFF_BUILTIN_WASM_PATH env var
             wasms: HashMap::from([(
                 WASMId(0),
                 WasmLib {
                     encode_lib_path: BUILTIN_WASM_PATH.clone().into(),
-                    decode_wasm_binary: std::fs::read(BUILTIN_WASM_PATH.as_path()).unwrap().into(),
+                    decode_wasm_binary: wasm_binary.into(),
                 },
             )]),
             data_type_to_wasm_id: HashMap::default(),
@@ -126,8 +141,8 @@ impl WASMWritingContext {
 }
 
 pub struct WASMReadingContext<R> {
-    /// runtime
-    lazy_wasm: OnceLock<HashMap<WASMId, Arc<Runtime>>>,
+    /// runtime - stores Result to handle initialization errors
+    lazy_wasm: OnceLock<fff_core::errors::Result<HashMap<WASMId, Arc<Runtime>>>>,
     wasm_locations: Option<MetadataSection>,
     r: Option<R>,
     /// Mapping of encoding types to their semantic versions
@@ -137,7 +152,7 @@ pub struct WASMReadingContext<R> {
 impl<R: Reader> WASMReadingContext<R> {
     // Private constructor to reduce code duplication
     fn new_internal(
-        lazy_wasm: OnceLock<HashMap<WASMId, Arc<Runtime>>>,
+        lazy_wasm: OnceLock<fff_core::errors::Result<HashMap<WASMId, Arc<Runtime>>>>,
         wasm_locations: Option<MetadataSection>,
         r: Option<R>,
         encoding_versions: Option<HashMap<fb::EncodingType, Version>>,
@@ -178,33 +193,63 @@ impl<R: Reader> WASMReadingContext<R> {
         encoding_versions: Option<HashMap<fb::EncodingType, Version>>,
     ) -> Self {
         let lazy_wasm = OnceLock::new();
-        lazy_wasm.get_or_init(|| wasm_rts);
+        lazy_wasm.get_or_init(|| Ok(wasm_rts));
         Self::new_internal(lazy_wasm, None, None, encoding_versions)
     }
 
-    pub fn get_runtime(&self, wasm_id: WASMId) -> Arc<Runtime> {
-        self.lazy_wasm
-            .get_or_init(|| {
-                let wasm_locations = self.wasm_locations.as_ref().unwrap();
-                let mut wasms = HashMap::new();
+    #[instrument(skip(self), fields(wasm_id = wasm_id.0))]
+    pub fn get_runtime(&self, wasm_id: WASMId) -> fff_core::errors::Result<Arc<Runtime>> {
+        let runtimes_result = self.lazy_wasm.get_or_init(|| {
+            debug!("Initializing WASM runtimes from file");
+
+            // Helper closure to handle initialization with proper error handling
+            let init = || -> fff_core::errors::Result<HashMap<WASMId, Arc<Runtime>>> {
+                let wasm_locations = self.wasm_locations.as_ref()
+                    .ok_or_else(|| fff_core::errors::Error::General("WASM locations not available".to_string()))?;
+                let read = self.r.as_ref()
+                    .ok_or_else(|| fff_core::errors::Error::General("Reader not available".to_string()))?;
+
                 let mut buf = vec![0; wasm_locations.size as usize];
-                let read = self.r.as_ref().unwrap();
-                read.read_exact_at(&mut buf, wasm_locations.offset).unwrap();
-                let wasm_binaries = flatbuffers::root::<fb::WASMBinaries>(&buf).unwrap();
-                for (id, loc) in wasm_binaries.wasm_binaries().unwrap().iter().enumerate() {
+                debug!(offset = wasm_locations.offset, size = wasm_locations.size, "Reading WASM binaries metadata");
+                read.read_exact_at(&mut buf, wasm_locations.offset)?;
+
+                let wasm_binaries = flatbuffers::root::<fb::WASMBinaries>(&buf)
+                    .map_err(|e| fff_core::errors::Error::General(format!("Failed to parse WASM binaries metadata: {}", e)))?;
+
+                let wasm_list = wasm_binaries.wasm_binaries()
+                    .ok_or_else(|| fff_core::errors::Error::General("WASM binaries list is empty".to_string()))?;
+
+                let mut wasms = HashMap::new();
+                for (id, loc) in wasm_list.iter().enumerate() {
                     let mut buf: Vec<u8> = vec![0; loc.size_() as usize];
-                    read.read_exact_at(&mut buf, loc.offset()).unwrap();
+                    read.read_exact_at(&mut buf, loc.offset())?;
                     let wasm_id = WASMId(id as u32);
-                    // let start = std::time::Instant::now();
-                    let rt = Arc::new(Runtime::try_new(&buf).unwrap());
-                    // println!("WASM runtime creation time: {:?}", start.elapsed());
+
+                    let start = std::time::Instant::now();
+                    debug!(wasm_id = id, size = loc.size_(), offset = loc.offset(), "Creating WASM runtime");
+
+                    let rt = Arc::new(Runtime::try_new(&buf)
+                        .map_err(|e| fff_core::errors::Error::General(format!("Failed to create WASM runtime for id {}: {}", id, e)))?);
+
+                    let elapsed = start.elapsed();
+                    info!(wasm_id = id, creation_time_ms = elapsed.as_millis(), "WASM runtime created successfully");
+
                     wasms.insert(wasm_id, rt);
                 }
-                wasms
-            })
-            .get(&wasm_id)
-            .unwrap()
-            .clone()
+                info!(num_runtimes = wasms.len(), "All WASM runtimes initialized");
+                Ok(wasms)
+            };
+
+            init()
+        });
+
+        // Handle the Result from initialization
+        let runtimes = runtimes_result.as_ref()
+            .map_err(|e| fff_core::errors::Error::General(format!("WASM initialization failed: {}", e)))?;
+
+        runtimes.get(&wasm_id)
+            .cloned()
+            .ok_or_else(|| fff_core::errors::Error::General(format!("WASM runtime not found for id: {}", wasm_id.0)))
     }
 
     pub fn get_encoding_versions(&self) -> Option<&HashMap<fb::EncodingType, Version>> {

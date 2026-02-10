@@ -12,6 +12,7 @@ use fff_format::File::fff::flatbuf as fb;
 use fff_format::ToFlatBuffer;
 use fff_format::{File::fff::flatbuf::CompressionType, MAGIC, MAJOR_VERSION, MINOR_VERSION};
 use flatbuffers::FlatBufferBuilder;
+use tracing::{debug, info, instrument};
 
 use crate::common::checksum::create_checksum;
 use crate::common::checksum::Checksum;
@@ -100,16 +101,22 @@ where
     }
 
     /// Finish the current row group and add it to the row groups table.
+    #[instrument(skip(self), fields(num_rows = self.num_rows_in_cur_row_group, num_columns = self.num_physical_columns))]
     pub fn finish_row_group(&mut self) -> Result<()> {
+        debug!("Finishing row group");
+        let size = (self.writer.stream_position()? - self.start_offset_of_cur_row_group) as u32;
+
         self.row_groups_table.add_meta(
             self.num_rows_in_cur_row_group,
             self.start_offset_of_cur_row_group,
-            (self.writer.stream_position()? - self.start_offset_of_cur_row_group) as u32,
+            size,
             RowGroupMetadata::new(std::mem::replace(
                 &mut self.column_metadatas_in_cur_row_group,
                 vec![ColumnMetadata::default(); self.num_physical_columns],
             )),
         );
+
+        debug!(size_bytes = size, "Row group finished");
         self.num_rows_in_cur_row_group = 0;
         self.start_offset_of_cur_row_group = self.writer.stream_position()?;
         Ok(())
@@ -246,7 +253,9 @@ impl<W: Write + Seek> FileWriter<W> {
         })
     }
 
+    #[instrument(skip(self, batch), fields(num_rows = batch.num_rows(), num_columns = batch.num_columns()))]
     pub fn write_batch(&mut self, batch: &RecordBatch) -> Result<()> {
+        debug!("Writing batch");
         // push each array into the column writer
         // the logic of metadata should also be in the column writer
         for (i, col) in batch.columns().iter().enumerate() {
@@ -285,9 +294,11 @@ impl<W: Write + Seek> FileWriter<W> {
         self.state.num_rows_in_file += batch.num_rows() as u32;
         self.state.num_rows_in_cur_row_group += batch.num_rows() as u32;
         if self.state.num_rows_in_cur_row_group as u64 >= self.row_group_size {
+            debug!(rows_in_group = self.state.num_rows_in_cur_row_group, "Flushing full row group");
             self.flush_pending_chunks()?;
             self.state.finish_row_group()?;
         }
+        debug!(total_rows_written = self.state.num_rows_in_file, "Batch written successfully");
         Ok(())
     }
 
@@ -309,7 +320,11 @@ impl<W: Write + Seek> FileWriter<W> {
         Ok(())
     }
 
+    #[instrument(skip(self), fields(total_rows = self.state.num_rows_in_file, num_row_groups = self.state.row_groups_table.row_counts().len()))]
     pub fn finish(mut self) -> Result<Vec<EncodingCounter>> {
+        info!("Finishing file write");
+        let start = std::time::Instant::now();
+
         // if dictionary mode is global with sharing, first submit all values to dictionary context
         if self.shared_dictionary_context.is_multi_col_sharing() {
             for encoder in self.column_encoders.iter_mut() {
@@ -499,6 +514,16 @@ impl<W: Write + Seek> FileWriter<W> {
         writer.write_all(MINOR_VERSION.to_le_bytes().as_ref())?;
         writer.write_all(MAGIC)?;
         writer.flush()?;
+
+        let elapsed = start.elapsed();
+        let file_position = writer.stream_position()?;
+        info!(
+            elapsed_ms = elapsed.as_millis(),
+            file_size_bytes = file_position,
+            file_size_mb = (file_position as f64 / 1_048_576.0),
+            "File write completed successfully"
+        );
+
         Ok(self.state.column_counters)
     }
 }

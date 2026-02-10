@@ -1,4 +1,5 @@
 use xxhash_rust::xxh64::Xxh64;
+use fff_core::errors::{Error, Result};
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Clone, Copy)]
@@ -6,11 +7,13 @@ pub enum ChecksumType {
     XxHash,
 }
 
-impl From<u8> for ChecksumType {
-    fn from(v: u8) -> ChecksumType {
+impl TryFrom<u8> for ChecksumType {
+    type Error = Error;
+
+    fn try_from(v: u8) -> Result<ChecksumType> {
         match v {
-            0 => ChecksumType::XxHash,
-            _ => panic!("Invalid checksum type"),
+            0 => Ok(ChecksumType::XxHash),
+            _ => Err(Error::General(format!("Invalid checksum type: {}", v))),
         }
     }
 }
@@ -74,5 +77,32 @@ mod tests {
         checksum.update(b"hell");
         let c4 = checksum.finalize();
         assert_ne!(c3, c4);
+    }
+
+    #[test]
+    fn test_checksum_type_from_u8_valid() {
+        // Test valid checksum type
+        let checksum_type = ChecksumType::try_from(0u8);
+        assert!(checksum_type.is_ok());
+        assert_eq!(checksum_type.unwrap(), ChecksumType::XxHash);
+    }
+
+    #[test]
+    fn test_checksum_type_from_u8_invalid() {
+        // Test invalid checksum types should return error, not panic
+        let invalid_values = [1u8, 2, 10, 100, 255];
+        for value in invalid_values {
+            let result = ChecksumType::try_from(value);
+            assert!(result.is_err(), "Expected error for value {}", value);
+        }
+    }
+
+    #[test]
+    fn test_checksum_type_roundtrip() {
+        // Test that we can convert to u8 and back
+        let original = ChecksumType::XxHash;
+        let as_u8 = original as u8;
+        let back = ChecksumType::try_from(as_u8).unwrap();
+        assert_eq!(original, back);
     }
 }

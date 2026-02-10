@@ -8,6 +8,7 @@ use parquet::file::reader::{ChunkReader, Length};
 use std::io::Read;
 use std::sync::{Arc, OnceLock};
 use std::{fs::File, os::unix::fs::FileExt};
+use tracing::{debug, error, instrument};
 
 lazy_static! {
     static ref RUNTIME: tokio::runtime::Runtime = tokio::runtime::Runtime::new().unwrap();
@@ -20,9 +21,18 @@ pub trait Reader {
 }
 
 impl Reader for File {
+    #[instrument(skip(self, buf), fields(size = buf.len(), offset))]
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-        // println!("read size: {:?}", buf.len());
-        FileExt::read_exact_at(self, buf, offset).map_err(Into::into)
+        debug!("Reading from local file");
+        let start = std::time::Instant::now();
+        let result = FileExt::read_exact_at(self, buf, offset).map_err(Into::into);
+        let elapsed = start.elapsed();
+
+        match &result {
+            Ok(_) => debug!(elapsed_us = elapsed.as_micros(), "File read completed"),
+            Err(e) => error!(error = %e, "File read failed"),
+        }
+        result
     }
 
     fn size(&self) -> Result<u64> {
@@ -71,10 +81,12 @@ impl ObjectStoreReadAt {
 }
 
 impl Reader for ObjectStoreReadAt {
+    #[instrument(skip(self, buf), fields(size = buf.len(), offset, location = %self.location))]
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-        // let start = std::time::Instant::now();
+        let start = std::time::Instant::now();
         let start_range = offset as usize;
 
+        debug!("Reading from object store");
         let object_store = Arc::clone(&self.object_store);
         let location = self.location.clone();
         let len = buf.len();
@@ -91,13 +103,16 @@ impl Reader for ObjectStoreReadAt {
 
         let bytes = head_result.map_err(fff_core::errors::Error::ObjectStore)?;
         buf.copy_from_slice(bytes.as_ref());
-        // println!("read {:?}", start.elapsed());
+        let elapsed = start.elapsed();
+        debug!(elapsed_ms = elapsed.as_millis(), throughput_mbps = (len as f64 / elapsed.as_secs_f64() / 1_048_576.0), "Object store read completed");
         Ok(())
     }
 
+    #[instrument(skip(self), fields(location = %self.location))]
     fn size(&self) -> Result<u64> {
         Ok(*self.cache_size.get_or_init(|| {
-            // let start = std::time::Instant::now();
+            let start = std::time::Instant::now();
+            debug!("Fetching object size from store");
             let object_store = Arc::clone(&self.object_store);
             let location = self.location.clone();
             let head_result = block_on(async move {
@@ -106,11 +121,13 @@ impl Reader for ObjectStoreReadAt {
                     .await
                     .unwrap()
             });
-            // println!("size {:?}", start.elapsed());
-            head_result
+            let elapsed = start.elapsed();
+            let size = head_result
                 .map_err(fff_core::errors::Error::ObjectStore)
                 .map(|o| o.size as u64)
-                .unwrap()
+                .unwrap();
+            debug!(size, elapsed_ms = elapsed.as_millis(), "Object size retrieved");
+            size
         }))
     }
 }

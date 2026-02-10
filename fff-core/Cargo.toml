@@ -16,3 +16,4 @@ lazy_static = { workspace = true }
 object_store ={ workspace = true}
 flatbuffers = { workspace = true }
 anyhow = { workspace = true }
+tracing = { workspace = true }

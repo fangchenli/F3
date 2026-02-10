@@ -20,6 +20,7 @@ use fff_core::{
 use fff_format::File::fff::flatbuf::{self as fb, CompressionType};
 use fff_format::{MAGIC, POSTSCRIPT_SIZE};
 use std::sync::Arc;
+use tracing::{debug, info, instrument};
 
 mod projection;
 pub use projection::Projection;
@@ -102,7 +103,11 @@ impl<R: Reader> FileReaderV2<R> {
         self.schema.clone()
     }
 
+    #[instrument(skip(self), fields(num_row_groups = self.row_group_cnt_n_pointers.len(), num_columns = self.schema.fields().len()))]
     pub fn read_file(&mut self) -> Result<Vec<RecordBatch>> {
+        info!("Starting file read");
+        let start = std::time::Instant::now();
+
         let footer = Footer::try_new_with_projection(
             &self.row_group_cnt_n_pointers,
             self.grouped_column_metadata_buffers
@@ -116,7 +121,8 @@ impl<R: Reader> FileReaderV2<R> {
                 .collect(),
             self.schema.clone(),
         )?;
-        read_file_based_on_footer(
+
+        let result = read_file_based_on_footer(
             &mut self.reader,
             footer,
             &self.projections,
@@ -124,7 +130,17 @@ impl<R: Reader> FileReaderV2<R> {
             self.wasm_context.clone(),
             self.shared_dictionary_cache.as_ref(),
             self.checksum_type,
-        )
+        );
+
+        let elapsed = start.elapsed();
+        match &result {
+            Ok(batches) => {
+                let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+                info!(elapsed_ms = elapsed.as_millis(), num_batches = batches.len(), total_rows, "File read completed successfully");
+            }
+            Err(e) => info!(elapsed_ms = elapsed.as_millis(), error = %e, "File read failed"),
+        }
+        result
     }
 
     #[allow(clippy::type_complexity)]
@@ -180,7 +196,9 @@ impl<R: Reader> FileReaderV2<R> {
     }
 }
 
+#[instrument(skip(reader, post_script), fields(metadata_size = post_script.metadata_size))]
 fn get_metadata_buffer<R: Reader>(reader: &R, post_script: &PostScript) -> Result<MutableBuffer> {
+    debug!("Reading metadata buffer");
     if post_script.compression != CompressionType::Uncompressed {
         return Err(Error::General("Compression type not supported".to_string()));
     }
@@ -189,6 +207,7 @@ fn get_metadata_buffer<R: Reader>(reader: &R, post_script: &PostScript) -> Resul
         buffer.as_slice_mut(),
         reader.size()? - POSTSCRIPT_SIZE - post_script.metadata_size as u64,
     )?;
+    debug!("Metadata buffer read successfully");
     Ok(buffer)
 }
 
@@ -522,16 +541,20 @@ fn read_postscript<R: Reader + ?Sized>(reader: &R, file_size: u64) -> Result<Pos
     let metadata_size = LittleEndian::read_u32(&postscript_buffer[0..4]);
     let footer_size = LittleEndian::read_u32(&postscript_buffer[4..8]);
     let footer_compression = postscript_buffer[8];
-    let checksum_type = postscript_buffer[9];
+    let checksum_type_byte = postscript_buffer[9];
     let data_checksum = LittleEndian::read_u64(&postscript_buffer[10..18]);
     let schema_checksum = LittleEndian::read_u64(&postscript_buffer[18..26]);
     let major_version = LittleEndian::read_u16(&postscript_buffer[26..28]);
     let minor_version = LittleEndian::read_u16(&postscript_buffer[28..30]);
+
+    // Convert checksum type with proper error handling
+    let checksum_type = ChecksumType::try_from(checksum_type_byte)?;
+
     Ok(PostScript {
         metadata_size,
         footer_size,
         compression: footer_compression.into(),
-        checksum_type: checksum_type.into(),
+        checksum_type,
         data_checksum,
         schema_checksum,
         major_version,
