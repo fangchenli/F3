@@ -469,17 +469,19 @@ impl Decoder for VortexListDecoder {
         // .values()
         // .inner();
         match self.out_type {
-            DataType::List(_) => Ok(new_list_offsets_validity_from_buffers::<Int32Type>(
+            DataType::List(_) => new_list_offsets_validity_from_buffers::<Int32Type>(
                 vec![validity, offsets],
                 validity_array.len() as u64,
                 None,
-            )),
-            DataType::LargeList(_) => Ok(new_list_offsets_validity_from_buffers::<Int64Type>(
+            ),
+            DataType::LargeList(_) => new_list_offsets_validity_from_buffers::<Int64Type>(
                 vec![validity, offsets],
                 validity_array.len() as u64,
                 None,
+            ),
+            _ => Err(fff_core::errors::Error::General(
+                "wrong type in VortexListDecoder".to_string(),
             )),
-            _ => panic!("wrong type in VortexListDecoder"),
         }
     }
 }
@@ -537,19 +539,15 @@ impl Decoder for VortexListStructDecoder {
         let offsets = Buffer::from_vec(offsets);
         // let offsets = offsets_array.into_data().buffers()[0].clone();
         match self.out_type {
-            DataType::List(_) => Ok(new_list_offsets_validity_from_buffers::<Int32Type>(
+            DataType::List(_) => new_list_offsets_validity_from_buffers::<Int32Type>(
                 vec![validity, offsets],
                 validity_array.len() as u64,
                 Some(struct_array),
-            )),
+            ),
             DataType::LargeList(_) => unimplemented!(),
-            // Ok(new_list_offsets_validity_from_buffers::<Int64Type>(
-            //     vec![validity, offsets],
-            //     validity_array.len() as u64,
-            //     Some(struct_array),
-            // ))
-            // ,
-            _ => panic!("wrong type in VortexListDecoder"),
+            _ => Err(fff_core::errors::Error::General(
+                "wrong type in VortexListDecoder".to_string(),
+            )),
         }
     }
 
@@ -566,17 +564,19 @@ impl Decoder for VortexListStructDecoder {
         let struct_array = vortex_array_to_arrow(self.vortex_struct_array.take().unwrap());
         let offsets = offsets_array.into_data().buffers()[0].clone();
         match self.out_type {
-            DataType::List(_) => Ok(new_list_offsets_validity_from_buffers::<Int32Type>(
+            DataType::List(_) => new_list_offsets_validity_from_buffers::<Int32Type>(
                 vec![validity, offsets],
                 validity_array.len() as u64,
                 Some(struct_array),
-            )),
-            DataType::LargeList(_) => Ok(new_list_offsets_validity_from_buffers::<Int64Type>(
+            ),
+            DataType::LargeList(_) => new_list_offsets_validity_from_buffers::<Int64Type>(
                 vec![validity, offsets],
                 validity_array.len() as u64,
                 Some(struct_array),
+            ),
+            _ => Err(fff_core::errors::Error::General(
+                "wrong type in VortexListDecoder".to_string(),
             )),
-            _ => panic!("wrong type in VortexListDecoder"),
         }
     }
 }

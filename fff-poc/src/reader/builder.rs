@@ -216,11 +216,7 @@ impl<R: Reader + Clone> FileReaderV2Builder<R> {
         for rg_meta_fbs in row_group_metadata_fbs.iter() {
             let mut column_metadata_buffers: Vec<Bytes> = vec![];
             let column_meta_ptrs = match self.projections {
-                Projection::All => rg_meta_fbs
-                    .col_metadatas()
-                    .unwrap()
-                    .into_iter()
-                    .collect(),
+                Projection::All => rg_meta_fbs.col_metadatas().unwrap().into_iter().collect(),
                 Projection::LeafColumnIndexes(ref projections) => {
                     let mut column_meta_offsets = vec![];
                     for i in projections {

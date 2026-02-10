@@ -1,5 +1,5 @@
-use xxhash_rust::xxh64::Xxh64;
 use fff_core::errors::{Error, Result};
+use xxhash_rust::xxh64::Xxh64;
 
 #[repr(u8)]
 #[derive(PartialEq, Debug, Clone, Copy)]

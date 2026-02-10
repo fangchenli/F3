@@ -86,7 +86,16 @@ impl SharedDictionaryContext {
         dict_idx: u32,
         arr: ArrayRef,
     ) -> Result<ArrayRef, Error> {
-        let dictionary = &mut self.dictionaries[dict_idx as usize];
+        let num_dicts = self.dictionaries.len();
+        let dictionary = self
+            .dictionaries
+            .get_mut(dict_idx as usize)
+            .ok_or_else(|| {
+                Error::General(format!(
+                    "Dictionary index {} out of bounds (have {} dictionaries)",
+                    dict_idx, num_dicts
+                ))
+            })?;
         dictionary.extend_and_get_index(arr)
     }
 
@@ -104,14 +113,10 @@ impl SharedDictionaryContext {
             dict.dict_hash_iter()?.for_each(|val| sketch.add_hash(val));
             sketch.finish();
             let dtype = &dict.datatype;
-            if dtype_to_sketches.contains_key(dtype) {
-                dtype_to_sketches
-                    .get_mut(dtype)
-                    .unwrap()
-                    .push((idx, sketch));
-            } else {
-                dtype_to_sketches.insert(dtype.clone(), vec![(idx, sketch)]);
-            }
+            dtype_to_sketches
+                .entry(dtype.clone())
+                .or_default()
+                .push((idx, sketch));
         }
         let merge_res = &mut self.merge_result;
         merge_res.resize(dicts.len(), None);
@@ -131,7 +136,7 @@ impl SharedDictionaryContext {
             }
             similarity_edges.sort_unstable_by(|x, y| {
                 x.0.partial_cmp(&y.0)
-                    .unwrap()
+                    .unwrap_or(std::cmp::Ordering::Equal)
                     .reverse()
                     .then(x.1.cmp(&y.1))
                     .then(x.2.cmp(&y.2))
@@ -166,7 +171,17 @@ impl SharedDictionaryContext {
     }
 
     pub fn submit_values(&mut self, dict_idx: u32, values: ArrayRef) -> Result<(), Error> {
-        self.dictionaries[dict_idx as usize].submit_values(values)
+        let num_dicts = self.dictionaries.len();
+        let dictionary = self
+            .dictionaries
+            .get_mut(dict_idx as usize)
+            .ok_or_else(|| {
+                Error::General(format!(
+                    "Dictionary index {} out of bounds (have {} dictionaries)",
+                    dict_idx, num_dicts
+                ))
+            })?;
+        dictionary.submit_values(values)
     }
 
     #[allow(clippy::type_complexity)]
@@ -263,7 +278,14 @@ impl SharedDictionaryContext {
     }
 
     pub fn dict_len(&self, dict_idx: u32) -> Result<usize, Error> {
-        self.dictionaries[dict_idx as usize].len()
+        let dictionary = self.dictionaries.get(dict_idx as usize).ok_or_else(|| {
+            Error::General(format!(
+                "Dictionary index {} out of bounds (have {} dictionaries)",
+                dict_idx,
+                self.dictionaries.len()
+            ))
+        })?;
+        dictionary.len()
     }
 
     pub fn is_multi_col_sharing(&self) -> bool {

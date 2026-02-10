@@ -294,11 +294,17 @@ impl<W: Write + Seek> FileWriter<W> {
         self.state.num_rows_in_file += batch.num_rows() as u32;
         self.state.num_rows_in_cur_row_group += batch.num_rows() as u32;
         if self.state.num_rows_in_cur_row_group as u64 >= self.row_group_size {
-            debug!(rows_in_group = self.state.num_rows_in_cur_row_group, "Flushing full row group");
+            debug!(
+                rows_in_group = self.state.num_rows_in_cur_row_group,
+                "Flushing full row group"
+            );
             self.flush_pending_chunks()?;
             self.state.finish_row_group()?;
         }
-        debug!(total_rows_written = self.state.num_rows_in_file, "Batch written successfully");
+        debug!(
+            total_rows_written = self.state.num_rows_in_file,
+            "Batch written successfully"
+        );
         Ok(())
     }
 

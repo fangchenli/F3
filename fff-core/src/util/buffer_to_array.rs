@@ -29,13 +29,24 @@ use snafu::location;
 use crate::errors::{Error, Result};
 use lazy_static::lazy_static;
 
+/// Helper to extract the next buffer from an iterator, returning a descriptive error
+/// if the iterator is exhausted.
+fn next_buf<T>(iter: &mut impl Iterator<Item = T>, context: &str) -> Result<T> {
+    iter.next().ok_or_else(|| {
+        Error::General(format!(
+            "Missing expected buffer in {}: buffer list has fewer elements than expected",
+            context
+        ))
+    })
+}
+
 pub fn new_primitive_array<T: ArrowPrimitiveType>(
     buffers: Vec<BytesMut>,
     num_rows: u64,
     data_type: &DataType,
-) -> ArrayRef {
+) -> Result<ArrayRef> {
     let mut buffer_iter = buffers.into_iter();
-    let null_buffer = buffer_iter.next().unwrap();
+    let null_buffer = next_buf(&mut buffer_iter, "new_primitive_array (validity)")?;
     let null_buffer = if null_buffer.is_empty() {
         None
     } else {
@@ -47,19 +58,21 @@ pub fn new_primitive_array<T: ArrowPrimitiveType>(
         )))
     };
 
-    let data_buffer = buffer_iter.next().unwrap().freeze();
+    let data_buffer = next_buf(&mut buffer_iter, "new_primitive_array (data)")?.freeze();
     let data_buffer = Buffer::from_bytes(data_buffer.into());
     let data_buffer = ScalarBuffer::<T::Native>::new(data_buffer, 0, num_rows as usize);
 
     // The with_data_type is needed here to recover the parameters for types like Decimal/Timestamp
-    Arc::new(PrimitiveArray::<T>::new(data_buffer, null_buffer).with_data_type(data_type.clone()))
+    Ok(Arc::new(
+        PrimitiveArray::<T>::new(data_buffer, null_buffer).with_data_type(data_type.clone()),
+    ))
 }
 
 pub fn new_primitive_array_from_arrow_buffer<T: ArrowPrimitiveType>(
     buffers: Vec<Buffer>,
     num_rows: u64,
     data_type: &DataType,
-) -> ArrayRef {
+) -> Result<ArrayRef> {
     let buffer_iter = buffers.into_iter();
     new_primitive_array_from_arrow_buffer_iter::<T>(buffer_iter, num_rows, data_type)
 }
@@ -68,24 +81,33 @@ pub fn new_primitive_array_from_arrow_buffer_iter<T: ArrowPrimitiveType>(
     mut buffer_iter: impl Iterator<Item = Buffer>,
     num_rows: u64,
     data_type: &DataType,
-) -> ArrayRef {
-    let null_buffer = buffer_iter.next().unwrap();
+) -> Result<ArrayRef> {
+    let null_buffer = next_buf(
+        &mut buffer_iter,
+        "new_primitive_array_from_arrow_buffer_iter (validity)",
+    )?;
     let null_buffer = arrow_buffer_to_validity(null_buffer, num_rows);
 
-    let data_buffer = buffer_iter.next().unwrap();
+    let data_buffer = next_buf(
+        &mut buffer_iter,
+        "new_primitive_array_from_arrow_buffer_iter (data)",
+    )?;
     let data_buffer = ScalarBuffer::<T::Native>::new(data_buffer, 0, num_rows as usize);
 
     // The with_data_type is needed here to recover the parameters for types like Decimal/Timestamp
-    Arc::<_>::new(
+    Ok(Arc::<_>::new(
         PrimitiveArray::<T>::new(data_buffer, null_buffer).with_data_type(data_type.clone()),
-    )
+    ))
 }
 
-pub fn new_generic_byte_array<T: ByteArrayType>(buffers: Vec<BytesMut>, num_rows: u64) -> ArrayRef {
+pub fn new_generic_byte_array<T: ByteArrayType>(
+    buffers: Vec<BytesMut>,
+    num_rows: u64,
+) -> Result<ArrayRef> {
     // iterate over buffers to get offsets and then bytes
     let mut buffer_iter = buffers.into_iter();
 
-    let null_buffer = buffer_iter.next().unwrap();
+    let null_buffer = next_buf(&mut buffer_iter, "new_generic_byte_array (validity)")?;
     let null_buffer = if null_buffer.is_empty() {
         None
     } else {
@@ -97,7 +119,7 @@ pub fn new_generic_byte_array<T: ByteArrayType>(buffers: Vec<BytesMut>, num_rows
         )))
     };
 
-    let indices_bytes = buffer_iter.next().unwrap().freeze();
+    let indices_bytes = next_buf(&mut buffer_iter, "new_generic_byte_array (indices)")?.freeze();
     let indices_buffer = Buffer::from_bytes(indices_bytes.into());
     let indices_buffer = ScalarBuffer::<T::Offset>::new(indices_buffer, 0, num_rows as usize + 1);
 
@@ -105,9 +127,9 @@ pub fn new_generic_byte_array<T: ByteArrayType>(buffers: Vec<BytesMut>, num_rows
 
     // Decoding the bytes creates 2 buffers, the first one is empty since
     // validity is stored in an earlier buffer
-    buffer_iter.next().unwrap();
+    next_buf(&mut buffer_iter, "new_generic_byte_array (empty validity)")?;
 
-    let bytes_buffer = buffer_iter.next().unwrap().freeze();
+    let bytes_buffer = next_buf(&mut buffer_iter, "new_generic_byte_array (bytes)")?.freeze();
     let bytes_buffer = Buffer::from_bytes(bytes_buffer.into());
     let bytes_buffer_len = bytes_buffer.len();
     let bytes_buffer = ScalarBuffer::<u8>::new(bytes_buffer, 0, bytes_buffer_len);
@@ -116,17 +138,17 @@ pub fn new_generic_byte_array<T: ByteArrayType>(buffers: Vec<BytesMut>, num_rows
         PrimitiveArray::<UInt8Type>::new(bytes_buffer, None).with_data_type(DataType::UInt8),
     );
 
-    Arc::new(GenericByteArray::<T>::new(
+    Ok(Arc::new(GenericByteArray::<T>::new(
         offsets,
         bytes_array.values().inner().clone(),
         null_buffer,
-    ))
+    )))
 }
 
 pub fn new_generic_byte_array_from_arrow_buffers<T: ByteArrayType>(
     buffers: Vec<Buffer>,
     num_rows: u64,
-) -> ArrayRef {
+) -> Result<ArrayRef> {
     // iterate over buffers to get offsets and then bytes
     let buffer_iter = buffers.into_iter();
 
@@ -136,8 +158,11 @@ pub fn new_generic_byte_array_from_arrow_buffers<T: ByteArrayType>(
 pub fn new_generic_byte_array_from_arrow_buffer_iter<T: ByteArrayType>(
     mut buffer_iter: impl Iterator<Item = Buffer>,
     num_rows: u64,
-) -> ArrayRef {
-    let null_buffer = buffer_iter.next().unwrap();
+) -> Result<ArrayRef> {
+    let null_buffer = next_buf(
+        &mut buffer_iter,
+        "new_generic_byte_array_from_arrow_buffer_iter (validity)",
+    )?;
     let null_buffer = if null_buffer.is_empty() {
         None
     } else {
@@ -148,16 +173,17 @@ pub fn new_generic_byte_array_from_arrow_buffer_iter<T: ByteArrayType>(
         )))
     };
 
-    let indices_buffer = buffer_iter.next().unwrap();
+    let indices_buffer = next_buf(
+        &mut buffer_iter,
+        "new_generic_byte_array_from_arrow_buffer_iter (indices)",
+    )?;
     let indices_buffer = ScalarBuffer::<T::Offset>::new(indices_buffer, 0, num_rows as usize + 1);
-    // for x in indices_buffer.windows(2) {
-    //     if x[0] > x[1] {
-    //         println!("{:?}", x);
-    //     }
-    // }
     let offsets = OffsetBuffer::new(indices_buffer.clone());
 
-    let bytes_buffer = buffer_iter.next().unwrap();
+    let bytes_buffer = next_buf(
+        &mut buffer_iter,
+        "new_generic_byte_array_from_arrow_buffer_iter (bytes)",
+    )?;
     let bytes_buffer_len = bytes_buffer.len();
     let bytes_buffer = ScalarBuffer::<u8>::new(bytes_buffer, 0, bytes_buffer_len);
 
@@ -165,18 +191,18 @@ pub fn new_generic_byte_array_from_arrow_buffer_iter<T: ByteArrayType>(
         PrimitiveArray::<UInt8Type>::new(bytes_buffer, None).with_data_type(DataType::UInt8),
     );
 
-    Arc::new(GenericByteArray::<T>::new(
+    Ok(Arc::new(GenericByteArray::<T>::new(
         offsets,
         bytes_array.values().inner().clone(),
         null_buffer,
-    ))
+    )))
 }
 
 pub fn new_generic_byte_view_array_from_arrow_buffer_iter<T: ByteViewType>(
     mut buffer_iter: impl Iterator<Item = Buffer>,
     num_rows: u64,
-) -> ArrayRef {
-    let null_buffer = buffer_iter.next().unwrap();
+) -> Result<ArrayRef> {
+    let null_buffer = next_buf(&mut buffer_iter, "new_generic_byte_view_array (validity)")?;
     let null_buffer = if null_buffer.is_empty() {
         None
     } else {
@@ -187,13 +213,13 @@ pub fn new_generic_byte_view_array_from_arrow_buffer_iter<T: ByteViewType>(
         )))
     };
 
-    let views_buffer = buffer_iter.next().unwrap();
+    let views_buffer = next_buf(&mut buffer_iter, "new_generic_byte_view_array (views)")?;
     let views_buffer = ScalarBuffer::<u128>::new(views_buffer, 0, num_rows as usize);
 
     // TODO: Safety: Vortex also does not validate utf8 in their to_arrow function from varbin so this may be fine.
-    Arc::new(unsafe {
+    Ok(Arc::new(unsafe {
         GenericByteViewArray::<T>::new_unchecked(views_buffer, buffer_iter.collect(), null_buffer)
-    })
+    }))
 }
 
 pub fn bytes_to_validity(bytes: BytesMut, num_rows: u64) -> Option<NullBuffer> {
@@ -226,13 +252,13 @@ pub fn new_list_offsets_validity<T: ArrowPrimitiveType>(
     buffers: Vec<BytesMut>,
     num_rows: u64,
     _child: FieldRef,
-) -> ArrayRef
+) -> Result<ArrayRef>
 where
     <T as ArrowPrimitiveType>::Native: OffsetSizeTrait,
     usize: TryFrom<<T as ArrowPrimitiveType>::Native>,
 {
     let mut buffer_iter = buffers.into_iter();
-    let null_buffer = buffer_iter.next().unwrap();
+    let null_buffer = next_buf(&mut buffer_iter, "new_list_offsets_validity (validity)")?;
     let null_buffer = if null_buffer.is_empty() {
         None
     } else {
@@ -244,20 +270,23 @@ where
         )))
     };
 
-    let data_buffer = buffer_iter.next().unwrap().freeze();
+    let data_buffer = next_buf(&mut buffer_iter, "new_list_offsets_validity (offsets)")?.freeze();
     let data_buffer = Buffer::from_bytes(data_buffer.into());
     let data_buffer = ScalarBuffer::<T::Native>::new(data_buffer, 0, num_rows as usize + 1);
     let max_offset: T::Native = data_buffer[num_rows as usize];
-    let dummy_array = Arc::new(NullArray::new(usize::try_from(max_offset).unwrap_or_else(
-        |_| panic!("usize conversion failed in new_list_offsets_validity"),
-    )));
-    Arc::new(GenericListArray::<T::Native>::new(
+    let max_offset_usize = usize::try_from(max_offset).map_err(|_| {
+        Error::General(
+            "usize conversion failed for list offset in new_list_offsets_validity".to_string(),
+        )
+    })?;
+    let dummy_array = Arc::new(NullArray::new(max_offset_usize));
+    Ok(Arc::new(GenericListArray::<T::Native>::new(
         // CAUTION: _child is no longer used here because here we simply put a Null dummy can let values decoder to handle items.
         DUMMY_NULL_FIELD.clone(),
         OffsetBuffer::new(data_buffer),
         dummy_array,
         null_buffer,
-    ))
+    )))
 }
 
 /// CAUTION: only offsets and validity are valid for this List Array! Items are just dummy nulls.
@@ -265,7 +294,7 @@ pub fn new_list_offsets_validity_from_buffers<T: ArrowPrimitiveType>(
     buffers: Vec<Buffer>,
     num_rows: u64,
     child: Option<ArrayRef>,
-) -> ArrayRef
+) -> Result<ArrayRef>
 where
     <T as ArrowPrimitiveType>::Native: OffsetSizeTrait,
     usize: TryFrom<<T as ArrowPrimitiveType>::Native>,
@@ -283,12 +312,15 @@ pub fn new_list_offsets_validity_from_buffer_iter<T: ArrowPrimitiveType>(
     mut buffer_iter: impl Iterator<Item = Buffer>,
     num_rows: u64,
     child: Option<ArrayRef>,
-) -> ArrayRef
+) -> Result<ArrayRef>
 where
     <T as ArrowPrimitiveType>::Native: OffsetSizeTrait,
     usize: TryFrom<<T as ArrowPrimitiveType>::Native>,
 {
-    let null_buffer = buffer_iter.next().unwrap();
+    let null_buffer = next_buf(
+        &mut buffer_iter,
+        "new_list_offsets_validity_from_buffer_iter (validity)",
+    )?;
     let null_buffer = if null_buffer.is_empty() {
         None
     } else {
@@ -299,13 +331,16 @@ where
         )))
     };
 
-    let data_buffer = buffer_iter.next().unwrap();
+    let data_buffer = next_buf(
+        &mut buffer_iter,
+        "new_list_offsets_validity_from_buffer_iter (offsets)",
+    )?;
     let data_buffer = ScalarBuffer::<T::Native>::new(data_buffer, 0, num_rows as usize + 1);
     let max_offset: T::Native = data_buffer[num_rows as usize];
-    let dummy_array = Arc::new(NullArray::new(usize::try_from(max_offset).unwrap_or_else(
-        |_| panic!("usize conversion failed in new_list_offsets_validity"),
-    )));
-    Arc::new(GenericListArray::<T::Native>::new(
+    let max_offset_usize = usize::try_from(max_offset)
+        .map_err(|_| Error::General("usize conversion failed for list offset".to_string()))?;
+    let dummy_array = Arc::new(NullArray::new(max_offset_usize));
+    Ok(Arc::new(GenericListArray::<T::Native>::new(
         if let Some(ref child) = child {
             Arc::new(Field::new(
                 "dummy",
@@ -322,7 +357,7 @@ where
             dummy_array
         },
         null_buffer,
-    ))
+    )))
 }
 
 pub fn primitive_array_from_arrow_buffers(
@@ -341,32 +376,41 @@ pub fn primitive_array_from_arrow_buffers_iter(
 ) -> Result<ArrayRef> {
     match data_type {
         DataType::Boolean => {
-            let null_buffer = buffer_iter.next().unwrap();
+            let null_buffer = next_buf(
+                &mut buffer_iter,
+                "primitive_array_from_arrow_buffers_iter Boolean (validity)",
+            )?;
             let null_buffer = arrow_buffer_to_validity(null_buffer, num_rows);
 
-            let data_buffer = buffer_iter.next().unwrap();
-            let data_buffer = data_buffer;
+            let data_buffer = next_buf(
+                &mut buffer_iter,
+                "primitive_array_from_arrow_buffers_iter Boolean (data)",
+            )?;
             let data_buffer = BooleanBuffer::new(data_buffer, 0, num_rows as usize);
 
             Ok(Arc::new(BooleanArray::new(data_buffer, null_buffer)))
         }
-        DataType::Date32 => Ok(new_primitive_array_from_arrow_buffer_iter::<Date32Type>(
+        DataType::Date32 => new_primitive_array_from_arrow_buffer_iter::<Date32Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Date64 => Ok(new_primitive_array_from_arrow_buffer_iter::<Date64Type>(
+        ),
+        DataType::Date64 => new_primitive_array_from_arrow_buffer_iter::<Date64Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Decimal128(_, _) => Ok(new_primitive_array_from_arrow_buffer_iter::<
-            Decimal128Type,
-        >(buffer_iter, num_rows, data_type)),
-        DataType::Decimal256(_, _) => Ok(new_primitive_array_from_arrow_buffer_iter::<
-            Decimal256Type,
-        >(buffer_iter, num_rows, data_type)),
-        DataType::Duration(units) => Ok(match units {
+        ),
+        DataType::Decimal128(_, _) => new_primitive_array_from_arrow_buffer_iter::<Decimal128Type>(
+            buffer_iter,
+            num_rows,
+            data_type,
+        ),
+        DataType::Decimal256(_, _) => new_primitive_array_from_arrow_buffer_iter::<Decimal256Type>(
+            buffer_iter,
+            num_rows,
+            data_type,
+        ),
+        DataType::Duration(units) => match units {
             TimeUnit::Second => new_primitive_array_from_arrow_buffer_iter::<DurationSecondType>(
                 buffer_iter,
                 num_rows,
@@ -381,43 +425,41 @@ pub fn primitive_array_from_arrow_buffers_iter(
             TimeUnit::Nanosecond => new_primitive_array_from_arrow_buffer_iter::<
                 DurationNanosecondType,
             >(buffer_iter, num_rows, data_type),
-        }),
-        DataType::Float16 => Ok(new_primitive_array_from_arrow_buffer_iter::<Float16Type>(
+        },
+        DataType::Float16 => new_primitive_array_from_arrow_buffer_iter::<Float16Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Float32 => Ok(new_primitive_array_from_arrow_buffer_iter::<Float32Type>(
+        ),
+        DataType::Float32 => new_primitive_array_from_arrow_buffer_iter::<Float32Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Float64 => Ok(new_primitive_array_from_arrow_buffer_iter::<Float64Type>(
+        ),
+        DataType::Float64 => new_primitive_array_from_arrow_buffer_iter::<Float64Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Int16 => Ok(new_primitive_array_from_arrow_buffer_iter::<Int16Type>(
+        ),
+        DataType::Int16 => new_primitive_array_from_arrow_buffer_iter::<Int16Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Int32 => Ok(new_primitive_array_from_arrow_buffer_iter::<Int32Type>(
+        ),
+        DataType::Int32 => new_primitive_array_from_arrow_buffer_iter::<Int32Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Int64 => Ok(new_primitive_array_from_arrow_buffer_iter::<Int64Type>(
+        ),
+        DataType::Int64 => new_primitive_array_from_arrow_buffer_iter::<Int64Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::Int8 => Ok(new_primitive_array_from_arrow_buffer_iter::<Int8Type>(
-            buffer_iter,
-            num_rows,
-            data_type,
-        )),
-        DataType::Interval(unit) => Ok(match unit {
+        ),
+        DataType::Int8 => {
+            new_primitive_array_from_arrow_buffer_iter::<Int8Type>(buffer_iter, num_rows, data_type)
+        }
+        DataType::Interval(unit) => match unit {
             IntervalUnit::DayTime => new_primitive_array_from_arrow_buffer_iter::<
                 IntervalDayTimeType,
             >(buffer_iter, num_rows, data_type),
@@ -427,35 +469,35 @@ pub fn primitive_array_from_arrow_buffers_iter(
             IntervalUnit::YearMonth => new_primitive_array_from_arrow_buffer_iter::<
                 IntervalYearMonthType,
             >(buffer_iter, num_rows, data_type),
-        }),
+        },
         DataType::Null => Ok(new_null_array(data_type, num_rows as usize)),
-        DataType::Time32(unit) => {
-            match unit {
-                TimeUnit::Millisecond => Ok(new_primitive_array_from_arrow_buffer_iter::<
-                    Time32MillisecondType,
-                >(buffer_iter, num_rows, data_type)),
-                TimeUnit::Second => Ok(new_primitive_array_from_arrow_buffer_iter::<
-                    Time32SecondType,
-                >(buffer_iter, num_rows, data_type)),
-                _ => Err(Error::IO(
-                    format!("invalid time unit {:?} for 32-bit time type", unit),
-                    location!(),
-                )),
-            }
-        }
+        DataType::Time32(unit) => match unit {
+            TimeUnit::Millisecond => new_primitive_array_from_arrow_buffer_iter::<
+                Time32MillisecondType,
+            >(buffer_iter, num_rows, data_type),
+            TimeUnit::Second => new_primitive_array_from_arrow_buffer_iter::<Time32SecondType>(
+                buffer_iter,
+                num_rows,
+                data_type,
+            ),
+            _ => Err(Error::IO(
+                format!("invalid time unit {:?} for 32-bit time type", unit),
+                location!(),
+            )),
+        },
         DataType::Time64(unit) => match unit {
-            TimeUnit::Microsecond => Ok(new_primitive_array_from_arrow_buffer_iter::<
+            TimeUnit::Microsecond => new_primitive_array_from_arrow_buffer_iter::<
                 Time64MicrosecondType,
-            >(buffer_iter, num_rows, data_type)),
-            TimeUnit::Nanosecond => Ok(new_primitive_array_from_arrow_buffer_iter::<
+            >(buffer_iter, num_rows, data_type),
+            TimeUnit::Nanosecond => new_primitive_array_from_arrow_buffer_iter::<
                 Time64NanosecondType,
-            >(buffer_iter, num_rows, data_type)),
+            >(buffer_iter, num_rows, data_type),
             _ => Err(Error::IO(
                 format!("invalid time unit {:?} for 64-bit time type", unit),
                 location!(),
             )),
         },
-        DataType::Timestamp(unit, _) => Ok(match unit {
+        DataType::Timestamp(unit, _) => match unit {
             TimeUnit::Microsecond => new_primitive_array_from_arrow_buffer_iter::<
                 TimestampMicrosecondType,
             >(buffer_iter, num_rows, data_type),
@@ -470,90 +512,47 @@ pub fn primitive_array_from_arrow_buffers_iter(
                 num_rows,
                 data_type,
             ),
-        }),
-        DataType::UInt16 => Ok(new_primitive_array_from_arrow_buffer_iter::<UInt16Type>(
+        },
+        DataType::UInt16 => new_primitive_array_from_arrow_buffer_iter::<UInt16Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::UInt32 => Ok(new_primitive_array_from_arrow_buffer_iter::<UInt32Type>(
+        ),
+        DataType::UInt32 => new_primitive_array_from_arrow_buffer_iter::<UInt32Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::UInt64 => Ok(new_primitive_array_from_arrow_buffer_iter::<UInt64Type>(
+        ),
+        DataType::UInt64 => new_primitive_array_from_arrow_buffer_iter::<UInt64Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        DataType::UInt8 => Ok(new_primitive_array_from_arrow_buffer_iter::<UInt8Type>(
+        ),
+        DataType::UInt8 => new_primitive_array_from_arrow_buffer_iter::<UInt8Type>(
             buffer_iter,
             num_rows,
             data_type,
-        )),
-        // DataType::FixedSizeBinary(dimension) => {
-        //     let mut buffers_iter = buffers.into_iter();
-        //     let fsb_validity = buffers_iter.next().unwrap();
-        //     let fsb_nulls = bytes_to_validity(fsb_validity, num_rows);
-
-        //     let fsb_values = buffers_iter.next().unwrap();
-        //     let fsb_values = Buffer::from_bytes(fsb_values.freeze().into());
-        //     Ok(Arc::new(FixedSizeBinaryArray::new(
-        //         *dimension, fsb_values, fsb_nulls,
-        //     )))
-        // }
-        // DataType::FixedSizeList(items, dimension) => {
-        //     let mut buffers_iter = buffers.into_iter();
-        //     let fsl_validity = buffers_iter.next().unwrap();
-        //     let fsl_nulls = bytes_to_validity(fsl_validity, num_rows);
-
-        //     let remaining_buffers = buffers_iter.collect::<Vec<_>>();
-        //     let items_array = primitive_array_from_buffers(
-        //         items.data_type(),
-        //         remaining_buffers,
-        //         num_rows * (*dimension as u64),
-        //     )?;
-        //     Ok(Arc::new(FixedSizeListArray::new(
-        //         items.clone(),
-        //         *dimension,
-        //         items_array,
-        //         fsl_nulls,
-        //     )))
-        // }
+        ),
 
         // FIXME: vortex currently output Utf8View as canonical type
         DataType::Utf8 | DataType::LargeUtf8 => {
-            Ok(new_generic_byte_view_array_from_arrow_buffer_iter::<
-                StringViewType,
-            >(buffer_iter, num_rows))
+            new_generic_byte_view_array_from_arrow_buffer_iter::<StringViewType>(
+                buffer_iter,
+                num_rows,
+            )
         }
         DataType::Binary | DataType::LargeBinary => {
-            Ok(new_generic_byte_view_array_from_arrow_buffer_iter::<
-                BinaryViewType,
-            >(buffer_iter, num_rows))
+            new_generic_byte_view_array_from_arrow_buffer_iter::<BinaryViewType>(
+                buffer_iter,
+                num_rows,
+            )
         }
-        // DataType::Utf8 => Ok(new_generic_byte_array_from_arrow_buffer_iter::<
-        //     GenericStringType<i32>,
-        // >(buffer_iter, num_rows)),
-        // DataType::LargeUtf8 => Ok(new_generic_byte_array_from_arrow_buffer_iter::<
-        //     GenericStringType<i32>,
-        // >(buffer_iter, num_rows)),
-        // DataType::Binary => Ok(new_generic_byte_array_from_arrow_buffer_iter::<
-        //     GenericBinaryType<i32>,
-        // >(buffer_iter, num_rows)),
-        // DataType::LargeBinary => Ok(new_generic_byte_array_from_arrow_buffer_iter::<
-        //     GenericBinaryType<i64>,
-        // >(buffer_iter, num_rows)),
-        DataType::List(_child) => Ok(new_list_offsets_validity_from_buffer_iter::<Int32Type>(
-            buffer_iter,
-            num_rows,
-            None,
-        )),
-        DataType::LargeList(_child) => Ok(new_list_offsets_validity_from_buffer_iter::<Int64Type>(
-            buffer_iter,
-            num_rows,
-            None,
-        )),
+        DataType::List(_child) => {
+            new_list_offsets_validity_from_buffer_iter::<Int32Type>(buffer_iter, num_rows, None)
+        }
+        DataType::LargeList(_child) => {
+            new_list_offsets_validity_from_buffer_iter::<Int64Type>(buffer_iter, num_rows, None)
+        }
         _ => Err(Error::IO(
             format!(
                 "The data type {} cannot be decoded from a primitive encoding",
@@ -572,28 +571,30 @@ pub fn primitive_array_from_buffers(
     match data_type {
         DataType::Boolean => {
             let mut buffer_iter = buffers.into_iter();
-            let null_buffer = buffer_iter.next().unwrap();
+            let null_buffer = next_buf(
+                &mut buffer_iter,
+                "primitive_array_from_buffers Boolean (validity)",
+            )?;
             let null_buffer = bytes_to_validity(null_buffer, num_rows);
 
-            let data_buffer = buffer_iter.next().unwrap();
+            let data_buffer = next_buf(
+                &mut buffer_iter,
+                "primitive_array_from_buffers Boolean (data)",
+            )?;
             let data_buffer = Buffer::from_vec(Vec::<u8>::from(data_buffer));
             let data_buffer = BooleanBuffer::new(data_buffer, 0, num_rows as usize);
 
             Ok(Arc::new(BooleanArray::new(data_buffer, null_buffer)))
         }
-        DataType::Date32 => Ok(new_primitive_array::<Date32Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Date64 => Ok(new_primitive_array::<Date64Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Decimal128(_, _) => Ok(new_primitive_array::<Decimal128Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Decimal256(_, _) => Ok(new_primitive_array::<Decimal256Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Duration(units) => Ok(match units {
+        DataType::Date32 => new_primitive_array::<Date32Type>(buffers, num_rows, data_type),
+        DataType::Date64 => new_primitive_array::<Date64Type>(buffers, num_rows, data_type),
+        DataType::Decimal128(_, _) => {
+            new_primitive_array::<Decimal128Type>(buffers, num_rows, data_type)
+        }
+        DataType::Decimal256(_, _) => {
+            new_primitive_array::<Decimal256Type>(buffers, num_rows, data_type)
+        }
+        DataType::Duration(units) => match units {
             TimeUnit::Second => {
                 new_primitive_array::<DurationSecondType>(buffers, num_rows, data_type)
             }
@@ -606,29 +607,15 @@ pub fn primitive_array_from_buffers(
             TimeUnit::Nanosecond => {
                 new_primitive_array::<DurationNanosecondType>(buffers, num_rows, data_type)
             }
-        }),
-        DataType::Float16 => Ok(new_primitive_array::<Float16Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Float32 => Ok(new_primitive_array::<Float32Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Float64 => Ok(new_primitive_array::<Float64Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Int16 => Ok(new_primitive_array::<Int16Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Int32 => Ok(new_primitive_array::<Int32Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Int64 => Ok(new_primitive_array::<Int64Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Int8 => Ok(new_primitive_array::<Int8Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::Interval(unit) => Ok(match unit {
+        },
+        DataType::Float16 => new_primitive_array::<Float16Type>(buffers, num_rows, data_type),
+        DataType::Float32 => new_primitive_array::<Float32Type>(buffers, num_rows, data_type),
+        DataType::Float64 => new_primitive_array::<Float64Type>(buffers, num_rows, data_type),
+        DataType::Int16 => new_primitive_array::<Int16Type>(buffers, num_rows, data_type),
+        DataType::Int32 => new_primitive_array::<Int32Type>(buffers, num_rows, data_type),
+        DataType::Int64 => new_primitive_array::<Int64Type>(buffers, num_rows, data_type),
+        DataType::Int8 => new_primitive_array::<Int8Type>(buffers, num_rows, data_type),
+        DataType::Interval(unit) => match unit {
             IntervalUnit::DayTime => {
                 new_primitive_array::<IntervalDayTimeType>(buffers, num_rows, data_type)
             }
@@ -638,33 +625,33 @@ pub fn primitive_array_from_buffers(
             IntervalUnit::YearMonth => {
                 new_primitive_array::<IntervalYearMonthType>(buffers, num_rows, data_type)
             }
-        }),
+        },
         DataType::Null => Ok(new_null_array(data_type, num_rows as usize)),
         DataType::Time32(unit) => match unit {
-            TimeUnit::Millisecond => Ok(new_primitive_array::<Time32MillisecondType>(
-                buffers, num_rows, data_type,
-            )),
-            TimeUnit::Second => Ok(new_primitive_array::<Time32SecondType>(
-                buffers, num_rows, data_type,
-            )),
+            TimeUnit::Millisecond => {
+                new_primitive_array::<Time32MillisecondType>(buffers, num_rows, data_type)
+            }
+            TimeUnit::Second => {
+                new_primitive_array::<Time32SecondType>(buffers, num_rows, data_type)
+            }
             _ => Err(Error::IO(
                 format!("invalid time unit {:?} for 32-bit time type", unit),
                 location!(),
             )),
         },
         DataType::Time64(unit) => match unit {
-            TimeUnit::Microsecond => Ok(new_primitive_array::<Time64MicrosecondType>(
-                buffers, num_rows, data_type,
-            )),
-            TimeUnit::Nanosecond => Ok(new_primitive_array::<Time64NanosecondType>(
-                buffers, num_rows, data_type,
-            )),
+            TimeUnit::Microsecond => {
+                new_primitive_array::<Time64MicrosecondType>(buffers, num_rows, data_type)
+            }
+            TimeUnit::Nanosecond => {
+                new_primitive_array::<Time64NanosecondType>(buffers, num_rows, data_type)
+            }
             _ => Err(Error::IO(
                 format!("invalid time unit {:?} for 64-bit time type", unit),
                 location!(),
             )),
         },
-        DataType::Timestamp(unit, _) => Ok(match unit {
+        DataType::Timestamp(unit, _) => match unit {
             TimeUnit::Microsecond => {
                 new_primitive_array::<TimestampMicrosecondType>(buffers, num_rows, data_type)
             }
@@ -677,25 +664,17 @@ pub fn primitive_array_from_buffers(
             TimeUnit::Second => {
                 new_primitive_array::<TimestampSecondType>(buffers, num_rows, data_type)
             }
-        }),
-        DataType::UInt16 => Ok(new_primitive_array::<UInt16Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::UInt32 => Ok(new_primitive_array::<UInt32Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::UInt64 => Ok(new_primitive_array::<UInt64Type>(
-            buffers, num_rows, data_type,
-        )),
-        DataType::UInt8 => Ok(new_primitive_array::<UInt8Type>(
-            buffers, num_rows, data_type,
-        )),
+        },
+        DataType::UInt16 => new_primitive_array::<UInt16Type>(buffers, num_rows, data_type),
+        DataType::UInt32 => new_primitive_array::<UInt32Type>(buffers, num_rows, data_type),
+        DataType::UInt64 => new_primitive_array::<UInt64Type>(buffers, num_rows, data_type),
+        DataType::UInt8 => new_primitive_array::<UInt8Type>(buffers, num_rows, data_type),
         DataType::FixedSizeBinary(dimension) => {
             let mut buffers_iter = buffers.into_iter();
-            let fsb_validity = buffers_iter.next().unwrap();
+            let fsb_validity = next_buf(&mut buffers_iter, "FixedSizeBinary (validity)")?;
             let fsb_nulls = bytes_to_validity(fsb_validity, num_rows);
 
-            let fsb_values = buffers_iter.next().unwrap();
+            let fsb_values = next_buf(&mut buffers_iter, "FixedSizeBinary (values)")?;
             let fsb_values = Buffer::from_bytes(fsb_values.freeze().into());
             Ok(Arc::new(FixedSizeBinaryArray::new(
                 *dimension, fsb_values, fsb_nulls,
@@ -703,7 +682,7 @@ pub fn primitive_array_from_buffers(
         }
         DataType::FixedSizeList(items, dimension) => {
             let mut buffers_iter = buffers.into_iter();
-            let fsl_validity = buffers_iter.next().unwrap();
+            let fsl_validity = next_buf(&mut buffers_iter, "FixedSizeList (validity)")?;
             let fsl_nulls = bytes_to_validity(fsl_validity, num_rows);
 
             let remaining_buffers = buffers_iter.collect::<Vec<_>>();
@@ -719,28 +698,18 @@ pub fn primitive_array_from_buffers(
                 fsl_nulls,
             )))
         }
-        DataType::Utf8 => Ok(new_generic_byte_array::<GenericStringType<i32>>(
-            buffers, num_rows,
-        )),
-        DataType::LargeUtf8 => Ok(new_generic_byte_array::<GenericStringType<i64>>(
-            buffers, num_rows,
-        )),
-        DataType::Binary => Ok(new_generic_byte_array::<GenericBinaryType<i32>>(
-            buffers, num_rows,
-        )),
-        DataType::LargeBinary => Ok(new_generic_byte_array::<GenericBinaryType<i64>>(
-            buffers, num_rows,
-        )),
-        DataType::List(child) => Ok(new_list_offsets_validity::<Int32Type>(
-            buffers,
-            num_rows,
-            Arc::clone(child),
-        )),
-        DataType::LargeList(child) => Ok(new_list_offsets_validity::<Int64Type>(
-            buffers,
-            num_rows,
-            Arc::clone(child),
-        )),
+        DataType::Utf8 => new_generic_byte_array::<GenericStringType<i32>>(buffers, num_rows),
+        DataType::LargeUtf8 => new_generic_byte_array::<GenericStringType<i64>>(buffers, num_rows),
+        DataType::Binary => new_generic_byte_array::<GenericBinaryType<i32>>(buffers, num_rows),
+        DataType::LargeBinary => {
+            new_generic_byte_array::<GenericBinaryType<i64>>(buffers, num_rows)
+        }
+        DataType::List(child) => {
+            new_list_offsets_validity::<Int32Type>(buffers, num_rows, Arc::clone(child))
+        }
+        DataType::LargeList(child) => {
+            new_list_offsets_validity::<Int64Type>(buffers, num_rows, Arc::clone(child))
+        }
         _ => Err(Error::IO(
             format!(
                 "The data type {} cannot be decoded from a primitive encoding",

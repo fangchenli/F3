@@ -136,7 +136,12 @@ impl<R: Reader> FileReaderV2<R> {
         match &result {
             Ok(batches) => {
                 let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
-                info!(elapsed_ms = elapsed.as_millis(), num_batches = batches.len(), total_rows, "File read completed successfully");
+                info!(
+                    elapsed_ms = elapsed.as_millis(),
+                    num_batches = batches.len(),
+                    total_rows,
+                    "File read completed successfully"
+                );
             }
             Err(e) => info!(elapsed_ms = elapsed.as_millis(), error = %e, "File read failed"),
         }

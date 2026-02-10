@@ -11,7 +11,8 @@ use std::{fs::File, os::unix::fs::FileExt};
 use tracing::{debug, error, instrument};
 
 lazy_static! {
-    static ref RUNTIME: tokio::runtime::Runtime = tokio::runtime::Runtime::new().unwrap();
+    static ref RUNTIME: tokio::runtime::Runtime = tokio::runtime::Runtime::new()
+        .expect("Failed to create tokio runtime for object store operations. This is a critical initialization failure.");
 }
 
 /// Read Trait for abstraction over local files and S3.
@@ -52,7 +53,21 @@ impl Reader for Arc<File> {
 
 impl Reader for [u8] {
     fn read_exact_at(&self, buf: &mut [u8], offset: u64) -> Result<()> {
-        buf.copy_from_slice(&self[offset as usize..(offset as usize + buf.len())]);
+        let offset = offset as usize;
+        let end = offset
+            .checked_add(buf.len())
+            .ok_or_else(|| fff_core::errors::Error::General("Offset overflow".to_string()))?;
+
+        if end > self.len() {
+            return Err(fff_core::errors::Error::General(format!(
+                "Read out of bounds: tried to read {} bytes at offset {} but slice length is {}",
+                buf.len(),
+                offset,
+                self.len()
+            )));
+        }
+
+        buf.copy_from_slice(&self[offset..end]);
         Ok(())
     }
 
@@ -90,7 +105,7 @@ impl Reader for ObjectStoreReadAt {
         let object_store = Arc::clone(&self.object_store);
         let location = self.location.clone();
         let len = buf.len();
-        let head_result = block_on(async move {
+        let join_result = block_on(async move {
             RUNTIME
                 .spawn(async move {
                     object_store
@@ -98,37 +113,54 @@ impl Reader for ObjectStoreReadAt {
                         .await
                 })
                 .await
-                .unwrap()
         });
 
+        let head_result = join_result
+            .map_err(|e| fff_core::errors::Error::General(format!("Task join error: {}", e)))?;
         let bytes = head_result.map_err(fff_core::errors::Error::ObjectStore)?;
         buf.copy_from_slice(bytes.as_ref());
         let elapsed = start.elapsed();
-        debug!(elapsed_ms = elapsed.as_millis(), throughput_mbps = (len as f64 / elapsed.as_secs_f64() / 1_048_576.0), "Object store read completed");
+        debug!(
+            elapsed_ms = elapsed.as_millis(),
+            throughput_mbps = (len as f64 / elapsed.as_secs_f64() / 1_048_576.0),
+            "Object store read completed"
+        );
         Ok(())
     }
 
     #[instrument(skip(self), fields(location = %self.location))]
     fn size(&self) -> Result<u64> {
-        Ok(*self.cache_size.get_or_init(|| {
-            let start = std::time::Instant::now();
-            debug!("Fetching object size from store");
-            let object_store = Arc::clone(&self.object_store);
-            let location = self.location.clone();
-            let head_result = block_on(async move {
-                RUNTIME
-                    .spawn(async move { object_store.head(&location).await })
-                    .await
-                    .unwrap()
-            });
-            let elapsed = start.elapsed();
-            let size = head_result
-                .map_err(fff_core::errors::Error::ObjectStore)
-                .map(|o| o.size as u64)
-                .unwrap();
-            debug!(size, elapsed_ms = elapsed.as_millis(), "Object size retrieved");
-            size
-        }))
+        // Try to get cached size, or compute it if not available
+        if let Some(&size) = self.cache_size.get() {
+            return Ok(size);
+        }
+
+        // Not cached, need to fetch it
+        let start = std::time::Instant::now();
+        debug!("Fetching object size from store");
+        let object_store = Arc::clone(&self.object_store);
+        let location = self.location.clone();
+        let join_result = block_on(async move {
+            RUNTIME
+                .spawn(async move { object_store.head(&location).await })
+                .await
+        });
+
+        let head_result = join_result
+            .map_err(|e| fff_core::errors::Error::General(format!("Task join error: {}", e)))?;
+        let elapsed = start.elapsed();
+        let size = head_result
+            .map_err(fff_core::errors::Error::ObjectStore)
+            .map(|o| o.size as u64)?;
+        debug!(
+            size,
+            elapsed_ms = elapsed.as_millis(),
+            "Object size retrieved"
+        );
+
+        // Cache the result for future calls
+        let _ = self.cache_size.set(size);
+        Ok(size)
     }
 }
 
@@ -154,8 +186,10 @@ pub struct ObjectStoreRead {
 }
 
 impl Read for ObjectStoreRead {
-    fn read(&mut self, buf: &mut [u8]) -> Result<usize, std::io::Error> {
-        self.read_at.read_exact_at(buf, self.offset as u64).unwrap();
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        self.read_at
+            .read_exact_at(buf, self.offset as u64)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
         self.offset += buf.len();
         Ok(buf.len())
     }
@@ -187,7 +221,13 @@ impl ChunkReader for ObjectStoreReadAt {
                         .await
                 })
                 .await
-                .unwrap()
+                .map_err(|e| object_store::Error::Generic {
+                    store: "ObjectStoreReadAt",
+                    source: Box::new(std::io::Error::new(
+                        std::io::ErrorKind::Other,
+                        format!("Task join error: {}", e),
+                    )),
+                })?
         });
         // println!("pq random access {:?}", t.elapsed());
 
