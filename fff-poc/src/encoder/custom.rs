@@ -34,10 +34,18 @@ impl CustomEncoder {
 
 impl Encoder for CustomEncoder {
     fn encode(&self, arr: arrow_array::ArrayRef) -> fff_core::errors::Result<EncUnit> {
-        let func: libloading::Symbol<EncodeFunc> =
-            unsafe { self.lib.get(self.func_name.as_bytes()).unwrap() };
+        let func: libloading::Symbol<EncodeFunc> = unsafe {
+            self.lib.get(self.func_name.as_bytes()).map_err(|e| {
+                fff_core::errors::Error::General(format!(
+                    "Failed to get encode function '{}': {}",
+                    self.func_name, e
+                ))
+            })?
+        };
         let encoded = {
-            let (ffi_arr, ffi_schema) = to_ffi(&arr.to_data()).unwrap();
+            let (ffi_arr, ffi_schema) = to_ffi(&arr.to_data()).map_err(|e| {
+                fff_core::errors::Error::General(format!("FFI conversion failed: {}", e))
+            })?;
             Bytes::from(unsafe { func(ffi_arr, ffi_schema) }.destroy_into_vec())
         };
         Ok(EncUnit::new(

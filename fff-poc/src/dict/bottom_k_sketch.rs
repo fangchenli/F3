@@ -35,7 +35,7 @@ impl BottomKSketch {
             let hash_val = a.wrapping_mul(val).wrapping_add(*b);
             if self.bottom_k[i].len() < K {
                 self.bottom_k[i].push(hash_val);
-            } else if hash_val < *self.bottom_k[i].peek().unwrap() {
+            } else if self.bottom_k[i].peek().is_some_and(|&max| hash_val < max) {
                 self.bottom_k[i].pop();
                 self.bottom_k[i].push(hash_val);
             }

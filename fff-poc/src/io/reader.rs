@@ -176,7 +176,9 @@ impl Reader for Arc<ObjectStoreReadAt> {
 
 impl Length for ObjectStoreReadAt {
     fn len(&self) -> u64 {
-        self.size().unwrap()
+        self.size().expect(
+            "ObjectStoreReadAt::size() failed in Length impl (required by Parquet ChunkReader)",
+        )
     }
 }
 

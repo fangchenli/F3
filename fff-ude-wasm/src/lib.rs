@@ -121,7 +121,10 @@ impl Debug for Runtime {
             .field("config", &self.config)
             .field("functions", &self.functions)
             .field("types", &self.types)
-            .field("instances", &self.instances.lock().unwrap().len())
+            .field(
+                "instances",
+                &self.instances.lock().map(|g| g.len()).unwrap_or(0),
+            )
             .finish()
     }
 }
@@ -134,12 +137,14 @@ static CACHE: Mutex<Option<HashMap<Vec<u8>, Vec<u8>>>> = Mutex::new(None);
 
 impl CacheStore for MyCacheStore {
     fn get(&self, key: &[u8]) -> Option<std::borrow::Cow<[u8]>> {
-        let mut cache = CACHE.lock().unwrap();
+        let mut cache = CACHE.lock().ok()?;
         let cache = cache.get_or_insert_with(HashMap::new);
         cache.get(key).map(|s| s.to_vec().into())
     }
     fn insert(&self, key: &[u8], value: Vec<u8>) -> bool {
-        let mut cache = CACHE.lock().unwrap();
+        let Ok(mut cache) = CACHE.lock() else {
+            return false;
+        };
         let cache = cache.get_or_insert_with(HashMap::new);
         cache.insert(key.to_vec(), value);
         true
@@ -156,7 +161,7 @@ static ENGINE: once_cell::sync::Lazy<Engine> = once_cell::sync::Lazy::new(|| {
             .cranelift_opt_level(wasmtime::OptLevel::None)
             .parallel_compilation(true),
     )
-    .unwrap()
+    .expect("failed to create wasmtime Engine - this is a critical initialization failure")
 });
 
 impl Runtime {
@@ -277,7 +282,7 @@ impl Runtime {
 
     /// Call a function that returns a single Buffer.
     pub fn call_single_buf(&self, _name: &str, _input: &[u8]) -> Result<WasmBuffer> {
-        panic!("Deprecated");
+        bail!("call_single_buf is deprecated");
         // if !self.functions.contains(name) {
         //     bail!("function not found: {name}");
         // }
@@ -337,32 +342,42 @@ impl Runtime {
             bail!("function not found: {name}");
         }
 
-        let mut instance = if let Some(instance) = self.instances.lock().unwrap().pop_front() {
+        let mut instance = if let Some(instance) = self
+            .instances
+            .lock()
+            .map_err(|e| anyhow!("instance pool lock poisoned: {}", e))?
+            .pop_front()
+        {
             instance
         } else {
-            // dbg!("new instance1");
             Arc::new(Mutex::new(Instance::new(self)?))
         };
         // call the function
-        let mut guard = instance.lock().unwrap();
-        // dbg!(guard.memory_size());
+        let mut guard = instance
+            .lock()
+            .map_err(|e| anyhow!("instance lock poisoned: {}", e))?;
         let mut output = guard.call_generic_function(name, input, instance.clone());
 
         // put the instance back to the pool
         if output.is_ok() {
-            self.instances.lock().unwrap().push_back(instance.clone());
+            self.instances
+                .lock()
+                .map_err(|e| anyhow!("instance pool lock poisoned: {}", e))?
+                .push_back(instance.clone());
         } else {
-            // println!("{:?}", output.as_ref().err());
-            // dbg!("new instance2");
-            // eprintln!("error: {:?}", output.as_ref().err());
             drop(guard);
             // We drop the instance here, but it may still be Arc'ed in some output Arrow Arrays.
             drop(instance);
             instance = Arc::new(Mutex::new(Instance::new(self)?));
-            guard = instance.lock().unwrap();
+            guard = instance
+                .lock()
+                .map_err(|e| anyhow!("instance lock poisoned: {}", e))?;
             output = guard.call_generic_function(name, input, instance.clone());
-            assert!(output.is_ok(), "error: {:?}", output.as_ref().err());
-            self.instances.lock().unwrap().push_back(instance.clone());
+            ensure!(output.is_ok(), "WASM function call failed on retry");
+            self.instances
+                .lock()
+                .map_err(|e| anyhow!("instance pool lock poisoned: {}", e))?
+                .push_back(instance.clone());
         }
 
         output
@@ -387,16 +402,19 @@ impl Runtime {
         };
 
         // call the function
-        let mut guard = instance.lock().unwrap();
-        let output = guard.read_batch(name, input, selection, instance.clone());
-        assert!(output.is_ok(), "error: {:?}", output.as_ref().err());
-        let output = output.unwrap();
+        let mut guard = instance
+            .lock()
+            .map_err(|e| anyhow!("instance lock poisoned: {}", e))?;
+        let output = guard.read_batch(name, input, selection, instance.clone())?;
         // put the instance back to the pool if no more results
         if let Some(output) = output {
             drop(guard);
             Ok(StreamReadResult::Batch((output, instance)))
         } else {
-            self.instances.lock().unwrap().push_back(instance.clone());
+            self.instances
+                .lock()
+                .map_err(|e| anyhow!("instance pool lock poisoned: {}", e))?
+                .push_back(instance.clone());
             Ok(StreamReadResult::End)
         }
     }
@@ -408,8 +426,13 @@ impl Runtime {
 
     // WARNING: This function is for testing only.
     pub fn memory_size(&self) -> usize {
-        let guard = self.instances.lock().unwrap();
-        let guard2 = guard[0].lock().unwrap();
+        let guard = self
+            .instances
+            .lock()
+            .expect("instance pool lock poisoned in memory_size");
+        let guard2 = guard[0]
+            .lock()
+            .expect("instance lock poisoned in memory_size");
         guard2.memory.data_size(&guard2.store)
     }
 }
@@ -438,7 +461,10 @@ struct BufferIter {
 impl BufferIter {
     /// Get the next record batch.
     fn next(&mut self) -> Result<Option<Buffer>> {
-        let mut guard = self.instance_arc.lock().unwrap();
+        let mut guard = self
+            .instance_arc
+            .lock()
+            .map_err(|e| anyhow!("BufferIter instance lock poisoned: {}", e))?;
         guard.buffer_iterator_next(self.ptr, self.alloc_ptr)?;
         // get return values
         let out_ptr = guard.read_u32(self.alloc_ptr)?;
@@ -484,20 +510,22 @@ impl Iterator for BufferIter {
 
     fn next(&mut self) -> Option<Self::Item> {
         let result = self.next();
-        self.instance_arc
+        let guard = self
+            .instance_arc
             .lock()
-            .unwrap()
+            .expect("BufferIter instance lock poisoned in Iterator::next");
+        guard
             .append_stdio(result)
-            .unwrap()
+            .expect("BufferIter::next failed during iteration")
     }
 }
 
 impl Drop for BufferIter {
     fn drop(&mut self) {
-        let mut guard = self.instance_arc.lock().unwrap();
-        // BUGFIX(1021): we reuse the input ptr and only reallocate if the input size is larger.
-        // _ = guard.dealloc(self.alloc_ptr, self.alloc_len, 4).unwrap();
-        guard.buffer_iterator_drop(self.ptr).unwrap();
+        if let Ok(mut guard) = self.instance_arc.lock() {
+            // BUGFIX(1021): we reuse the input ptr and only reallocate if the input size is larger.
+            let _ = guard.buffer_iterator_drop(self.ptr);
+        }
     }
 }
 
@@ -613,7 +641,12 @@ impl Instance {
                     // resize cached_alloc_ptr if input size is larger than cached size.
                     self.dealloc.call(
                         &mut self.store,
-                        (self.cached_alloc_ptr.unwrap(), cached_len, INPUT_ALIGNMENT),
+                        (
+                            self.cached_alloc_ptr
+                                .context("cached_alloc_ptr missing during realloc")?,
+                            cached_len,
+                            INPUT_ALIGNMENT,
+                        ),
                     )?;
                     self.cached_alloc_ptr =
                         Some(self.alloc.call(&mut self.store, (len, INPUT_ALIGNMENT))?);
@@ -687,7 +720,12 @@ impl Instance {
                     // resize cached_alloc_ptr if input size is larger than cached size.
                     self.dealloc.call(
                         &mut self.store,
-                        (self.cached_alloc_ptr.unwrap(), cached_len, INPUT_ALIGNMENT),
+                        (
+                            self.cached_alloc_ptr
+                                .context("cached_alloc_ptr missing during realloc")?,
+                            cached_len,
+                            INPUT_ALIGNMENT,
+                        ),
                     )?;
                     self.cached_alloc_ptr =
                         Some(self.alloc.call(&mut self.store, (len, INPUT_ALIGNMENT))?);
@@ -807,7 +845,12 @@ impl Instance {
                     // resize cached_alloc_ptr if input size is larger than cached size.
                     self.dealloc.call(
                         &mut self.store,
-                        (self.cached_alloc_ptr.unwrap(), cached_len, INPUT_ALIGNMENT),
+                        (
+                            self.cached_alloc_ptr
+                                .context("cached_alloc_ptr missing during realloc")?,
+                            cached_len,
+                            INPUT_ALIGNMENT,
+                        ),
                     )?;
                     self.cached_alloc_ptr =
                         Some(self.alloc.call(&mut self.store, (len, INPUT_ALIGNMENT))?);
@@ -847,16 +890,20 @@ impl Instance {
             .write(&mut self.store, kwargs_ptr as usize, kwargs)?;
 
         // call the function
-        let result = self.init.as_ref().unwrap().call(
-            &mut self.store,
-            (
-                in_ptr,
-                input.len() as u32,
-                kwargs_ptr,
-                kwargs.len() as u32,
-                alloc_ptr,
-            ),
-        );
+        let result = self
+            .init
+            .as_ref()
+            .context("init_ffi function not available in WASM module")?
+            .call(
+                &mut self.store,
+                (
+                    in_ptr,
+                    input.len() as u32,
+                    kwargs_ptr,
+                    kwargs.len() as u32,
+                    alloc_ptr,
+                ),
+            );
         let errno = self.append_stdio(result)?;
 
         // get return values
@@ -902,7 +949,12 @@ impl Instance {
                     // resize cached_alloc_ptr if input size is larger than cached size.
                     self.dealloc.call(
                         &mut self.store,
-                        (self.cached_alloc_ptr.unwrap(), cached_len, INPUT_ALIGNMENT),
+                        (
+                            self.cached_alloc_ptr
+                                .context("cached_alloc_ptr missing during realloc")?,
+                            cached_len,
+                            INPUT_ALIGNMENT,
+                        ),
                     )?;
                     self.cached_alloc_ptr =
                         Some(self.alloc.call(&mut self.store, (len, INPUT_ALIGNMENT))?);
@@ -938,7 +990,7 @@ impl Instance {
         let result = self
             .decode
             .as_ref()
-            .unwrap()
+            .context("decode_ffi function not available in WASM module")?
             .call(&mut self.store, (decoder, alloc_ptr));
 
         let errno = self.append_stdio(result)?;
@@ -979,7 +1031,7 @@ impl Instance {
         _selection: RowSelection,
         _instance_arc: Arc<Mutex<Instance>>,
     ) -> Result<Option<impl Iterator<Item = Buffer>>> {
-        todo!();
+        bail!("read_batch is not yet implemented");
         // get function
         let func = self
             .functions
@@ -994,7 +1046,12 @@ impl Instance {
                     // resize cached_alloc_ptr if input size is larger than cached size.
                     self.dealloc.call(
                         &mut self.store,
-                        (self.cached_alloc_ptr.unwrap(), cached_len, INPUT_ALIGNMENT),
+                        (
+                            self.cached_alloc_ptr
+                                .context("cached_alloc_ptr missing during realloc")?,
+                            cached_len,
+                            INPUT_ALIGNMENT,
+                        ),
                     )?;
                     self.cached_alloc_ptr =
                         Some(self.alloc.call(&mut self.store, (len, INPUT_ALIGNMENT))?);
@@ -1099,7 +1156,7 @@ impl Instance {
         Ok(u32::from_le_bytes(
             self.memory.data(&self.store)[ptr as usize..(ptr + 4) as usize]
                 .try_into()
-                .unwrap(),
+                .context("failed to convert memory slice to u32 bytes")?,
         ))
     }
 
@@ -1123,13 +1180,12 @@ impl Instance {
 impl Drop for Instance {
     fn drop(&mut self) {
         if let Some(ptr) = self.cached_alloc_ptr {
-            // deallocate memory
-            self.dealloc
-                .call(
-                    &mut self.store,
-                    (ptr, self.cached_alloc_len.unwrap(), INPUT_ALIGNMENT),
-                )
-                .unwrap();
+            if let Some(len) = self.cached_alloc_len {
+                // deallocate memory, ignore errors during drop
+                let _ = self
+                    .dealloc
+                    .call(&mut self.store, (ptr, len, INPUT_ALIGNMENT));
+            }
         }
     }
 }
@@ -1144,7 +1200,8 @@ fn _base64_decode(input: &str) -> Result<String> {
     // standard base64 uses '+' and '/', which is not a valid symbol name.
     // we use '$' and '_' instead.
     let alphabet =
-        Alphabet::new("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_").unwrap();
+        Alphabet::new("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789$_")
+            .expect("valid base64 alphabet literal");
     let engine = GeneralPurpose::new(&alphabet, NO_PAD);
     let bytes = engine.decode(input)?;
     String::from_utf8(bytes).context("invalid utf8")

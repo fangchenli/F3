@@ -52,7 +52,7 @@ impl EncUnit {
         for child in self._children.into_iter() {
             let child_flat = child._into_flat();
             buffers.extend(child_flat.buffers);
-            buffer_sizes.extend(child_flat.buffer_sizes.unwrap());
+            buffer_sizes.extend(child_flat.buffer_sizes.unwrap_or_default());
             encoding_tree.children.push(child_flat.encoding_tree);
         }
         FlatEncUnit {
@@ -86,7 +86,7 @@ impl Encoding {
         match self {
             Encoding::Vortex => fb::EncodingType::CASCADE,
             Encoding::Custom => fb::EncodingType::CUSTOM_WASM,
-            _ => unimplemented!(),
+            Encoding::BP => fb::EncodingType::CASCADE, // BP is legacy, map to CASCADE
         }
     }
 }
@@ -96,7 +96,7 @@ impl From<fb::EncodingType> for Encoding {
         match encoding {
             fb::EncodingType::CASCADE => Encoding::Vortex,
             fb::EncodingType::CUSTOM_WASM => Encoding::Custom,
-            _ => unimplemented!(),
+            _ => Encoding::Vortex, // Default fallback for unknown encoding types
         }
     }
 }
@@ -132,20 +132,24 @@ impl FlatEncUnit {
     /// padding to 4B alignment -> this is to ensure the next EncUnit is aligned at 4B.
     pub fn serialize<W: Write + Seek>(&self, mut write: W) -> Result<W> {
         let start = write.stream_position()?;
-        write
-            .write_u32::<LittleEndian>(self.buffers.len() as u32)
-            .unwrap();
-        for size in self.buffer_sizes.as_ref().unwrap().iter() {
+        write.write_u32::<LittleEndian>(self.buffers.len() as u32)?;
+        let buffer_sizes = self.buffer_sizes.as_ref().ok_or_else(|| {
+            fff_core::errors::Error::General(
+                "buffer_sizes not set during FlatEncUnit serialize".to_string(),
+            )
+        })?;
+        for size in buffer_sizes.iter() {
             write.write_u32::<LittleEndian>(*size)?;
         }
         // TODO: find the best serializer impl.
         let mut s = flexbuffers::FlexbufferSerializer::new();
-        self.encoding_tree.serialize(&mut s).unwrap();
+        self.encoding_tree.serialize(&mut s).map_err(|e| {
+            fff_core::errors::Error::General(format!("Failed to serialize encoding tree: {}", e))
+        })?;
         let encoding_tree = s.take_buffer();
         write.write_u32::<LittleEndian>(encoding_tree.len() as u32)?;
         write.write_all(&encoding_tree)?;
-        let written_len =
-            4 + self.buffer_sizes.as_ref().unwrap().len() * 4 + 4 + encoding_tree.len();
+        let written_len = 4 + buffer_sizes.len() * 4 + 4 + encoding_tree.len();
         write.write_all(&ZEROS[..padding_size(written_len, ALIGNMENT)])?;
         for buf in self.buffers.iter() {
             for buffer in buf.iter() {
@@ -158,23 +162,20 @@ impl FlatEncUnit {
     }
 
     pub fn try_deserialize(mut bytes: Bytes) -> Result<Self> {
-        let num_buffers = bytes
-            .split_to(4)
-            .as_ref()
-            .read_u32::<LittleEndian>()
-            .unwrap();
+        let num_buffers = bytes.split_to(4).as_ref().read_u32::<LittleEndian>()?;
         let buffer_sizes_bytes = bytes.split_to(num_buffers as usize * 4);
         let buffer_sizes: &[u32] = bytemuck::try_cast_slice(buffer_sizes_bytes.as_ref())?;
-        let size_encoding_tree = bytes
-            .split_to(4)
-            .as_ref()
-            .read_u32::<LittleEndian>()
-            .unwrap();
-        let encoding_tree = <EncodingTree as Deserialize>::deserialize(
-            flexbuffers::Reader::get_root(bytes.split_to(size_encoding_tree as usize).as_ref())
-                .unwrap(),
-        )
-        .unwrap();
+        let size_encoding_tree = bytes.split_to(4).as_ref().read_u32::<LittleEndian>()?;
+        let encoding_tree_bytes = bytes.split_to(size_encoding_tree as usize);
+        let reader = flexbuffers::Reader::get_root(encoding_tree_bytes.as_ref()).map_err(|e| {
+            fff_core::errors::Error::General(format!(
+                "Failed to read encoding tree flexbuffer: {}",
+                e
+            ))
+        })?;
+        let encoding_tree = <EncodingTree as Deserialize>::deserialize(reader).map_err(|e| {
+            fff_core::errors::Error::General(format!("Failed to deserialize encoding tree: {}", e))
+        })?;
         let written_len = 4 + size_encoding_tree as usize + 4 + num_buffers as usize * 4;
         let _padding = bytes.split_to(padding_size(written_len, ALIGNMENT));
         let mut buffers = vec![];
@@ -191,23 +192,15 @@ impl FlatEncUnit {
 
     /// WARNING: This function is only for testing purposes.
     pub fn read_first_buffer(bytes: Bytes) -> Result<Bytes> {
-        Self::try_deserialize(bytes).unwrap().buffers[0].try_to_dense()
+        Self::try_deserialize(bytes)?.buffers[0].try_to_dense()
     }
 
     /// No use for now. Written as an attempt to zero-copy Vortex decoding.
     pub fn try_deserialize_first_bytesmut(mut bytes: BytesMut) -> Result<BytesMut> {
-        let num_buffers = bytes
-            .split_to(4)
-            .as_ref()
-            .read_u32::<LittleEndian>()
-            .unwrap();
+        let num_buffers = bytes.split_to(4).as_ref().read_u32::<LittleEndian>()?;
         let buffer_sizes_bytes = bytes.split_to(num_buffers as usize * 4);
         let buffer_sizes: &[u32] = bytemuck::try_cast_slice(buffer_sizes_bytes.as_ref())?;
-        let size_encoding_tree = bytes
-            .split_to(4)
-            .as_ref()
-            .read_u32::<LittleEndian>()
-            .unwrap();
+        let size_encoding_tree = bytes.split_to(4).as_ref().read_u32::<LittleEndian>()?;
         let written_len = 4 + size_encoding_tree as usize + 4 + num_buffers as usize * 4;
         let _padding = bytes.split_to(padding_size(written_len, ALIGNMENT));
         let mut buffers: VecDeque<BytesMut> = vec![].into();
@@ -215,6 +208,8 @@ impl FlatEncUnit {
             let buffer = bytes.split_to(*size as usize);
             buffers.push_back(buffer);
         }
-        Ok(buffers.pop_front().unwrap())
+        buffers.pop_front().ok_or_else(|| {
+            fff_core::errors::Error::General("No buffers found in FlatEncUnit".to_string())
+        })
     }
 }

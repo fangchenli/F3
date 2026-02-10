@@ -72,7 +72,7 @@ impl WASMEncUnitDecoderV2 {
 
 impl EncUnitDecoder for WASMEncUnitDecoderV2 {
     fn decode_v2(&self) -> Result<Option<ArrayRef>> {
-        todo!();
+        nyi_err!("WASMEncUnitDecoderV2::decode_v2")
     }
 }
 
@@ -116,7 +116,10 @@ impl EncUnitDecoder for WASMEncUnitDecoder<'_> {
                     self.num_rows,
                 )?)
             }
-            _ => unimplemented!(),
+            other => Err(Error::General(format!(
+                "WASM EncUnit decoding not implemented for type {:?}",
+                other
+            ))),
         }
     }
 }
@@ -165,7 +168,12 @@ impl EncUnitDecoder for VortexEncUnitDecoder {
                 )?;
                 vortex_decoder.decode_all_as_array()?
             }
-            _ => unimplemented!(),
+            ref other => {
+                return Err(Error::General(format!(
+                    "Vortex EncUnit decoding not implemented for type {:?}",
+                    other
+                )))
+            }
         };
         if array.data_type() != &self.output_type {
             debug!(
@@ -174,11 +182,6 @@ impl EncUnitDecoder for VortexEncUnitDecoder {
                 array.data_type()
             );
         }
-        // return Err(Error::General(format!(
-        //     "data type mismatch: expected {}, got {}",
-        //     self.output_type,
-        //     array.data_type()
-        // )));
         Ok(array)
     }
 
@@ -214,7 +217,12 @@ impl EncUnitDecoder for VortexEncUnitDecoder {
                 // )?;
                 // vortex_decoder.decode_all_as_array()?
             }
-            _ => unimplemented!(),
+            ref other => {
+                return Err(Error::General(format!(
+                    "Vortex EncUnit slice not implemented for type {:?}",
+                    other
+                )))
+            }
         };
         if array.data_type() != &self.output_type {
             debug!(
@@ -223,11 +231,6 @@ impl EncUnitDecoder for VortexEncUnitDecoder {
                 array.data_type()
             );
         }
-        // return Err(Error::General(format!(
-        //     "data type mismatch: expected {}, got {}",
-        //     self.output_type,
-        //     array.data_type()
-        // )));
         Ok(array)
     }
 }
@@ -273,7 +276,14 @@ pub fn create_encunit_decoder<R: Reader>(
             let encoding_version = encoding_versions
                 .get(&encoding.type_())
                 .ok_or_else(|| general_error!("Encoding version not found"))?;
-            let reader_version = DEFAULT_ENCODING_VERSIONS.get(&encoding.type_()).unwrap();
+            let reader_version = DEFAULT_ENCODING_VERSIONS
+                .get(&encoding.type_())
+                .ok_or_else(|| {
+                    general_error!(format!(
+                        "No default encoding version for {:?}",
+                        encoding.type_()
+                    ))
+                })?;
             // if reader has less version than the file, and major version is different or major version is 0, then it is incompatible
             if reader_version.cmp_precedence(encoding_version).is_lt()
                 && (reader_version.major != encoding_version.major || reader_version.major == 0)
@@ -290,6 +300,11 @@ pub fn create_encunit_decoder<R: Reader>(
                 return Err(general_error!("WASM context required for custom encoding"));
             }
         }
-        _ => unimplemented!(),
+        other => {
+            return Err(Error::General(format!(
+                "Encoding type {:?} not supported",
+                other
+            )))
+        }
     })
 }

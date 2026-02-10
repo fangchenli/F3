@@ -25,20 +25,19 @@ impl SharedDictionaryCache {
         shared_dictionary_table: fb::SharedDictionaryTable,
         wasm_context: Option<Arc<WASMReadingContext<R>>>,
     ) -> Result<Self, Error> {
-        // TODO: remove these unwrap
         let positions = shared_dictionary_table
             .dictionary_positions()
-            .unwrap()
+            .ok_or_else(|| Error::ParseError("Dictionary positions not found".to_string()))?
             .iter()
             .map(|v| {
                 v.chunk_ids()
-                    .unwrap()
-                    .iter()
-                    .map(|x| x as usize)
-                    .collect::<Vec<_>>()
+                    .ok_or_else(|| Error::ParseError("Dictionary chunk IDs not found".to_string()))
+                    .map(|ids| ids.iter().map(|x| x as usize).collect::<Vec<_>>())
             })
-            .collect::<Vec<_>>();
-        let chunks = shared_dictionary_table.dictionary_chunks().unwrap();
+            .collect::<Result<Vec<_>, _>>()?;
+        let chunks = shared_dictionary_table
+            .dictionary_chunks()
+            .ok_or_else(|| Error::ParseError("Dictionary chunks not found".to_string()))?;
         let dictionary_chunk_sizes = chunks
             .iter()
             .map(|chunk_meta| chunk_meta.size_() as usize)

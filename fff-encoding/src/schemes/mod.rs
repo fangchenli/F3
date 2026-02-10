@@ -56,10 +56,14 @@ pub(crate) struct EncUnitMetadata {
 }
 
 pub fn encode_to_bytes(encoder: Rc<dyn Encoder>, arr: ArrayRef) -> Bytes {
-    let encblock = encoder.encode(arr).unwrap();
+    let encblock = encoder
+        .encode(arr)
+        .expect("encode_to_bytes: encoding failed");
     let mut buffer = Vec::new();
     let mut cursor = Cursor::new(&mut buffer);
-    encblock.try_serialize(&mut cursor).unwrap();
+    encblock
+        .try_serialize(&mut cursor)
+        .expect("encode_to_bytes: serialization failed");
     buffer.into()
 }
 pub(crate) struct NonNullDecoderState {
@@ -76,7 +80,7 @@ impl NonNullDecoderState {
             .split_to(4)
             .as_ref()
             .read_u32::<LittleEndian>()
-            .unwrap();
+            .expect("failed to read metadata size from encblock");
         let metadata = encblock.split_to(metadata_size as usize);
         let _padding = encblock
             .split_to((4 + metadata.len()).next_multiple_of(ALIGNMENT) - (4 + metadata.len()));
@@ -88,6 +92,7 @@ impl NonNullDecoderState {
     }
     pub(crate) fn metadata(&self) -> &ArchivedEncUnitMetadata {
         // unsafe { rkyv::archived_root::<EncUnitMetadata>(&self.metadata_bytes) }
-        rkyv::check_archived_root::<EncUnitMetadata>(&self.metadata_bytes).unwrap()
+        rkyv::check_archived_root::<EncUnitMetadata>(&self.metadata_bytes)
+            .expect("failed to deserialize EncUnitMetadata from archived bytes")
     }
 }

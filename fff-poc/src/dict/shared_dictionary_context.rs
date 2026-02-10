@@ -219,7 +219,7 @@ impl SharedDictionaryContext {
                         wasm_context.clone(),
                         dict.data_type().clone(),
                         false,
-                    );
+                    )?;
                     let write_slice = |slice, slice_len| -> Result<SerializedEncUnit, Error> {
                         let encoded_bytes = encode_to_bytes(dict_encoder.clone(), slice);
                         Ok(SerializedEncUnit::new(

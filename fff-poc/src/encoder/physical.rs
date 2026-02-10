@@ -180,7 +180,7 @@ impl PhysicalColEncoder for EncoderDictColEncoder {
             self.wasm_context.clone(),
             array.data_type().clone(),
             self.enable_dict,
-        );
+        )?;
         let enc_unit = encode_to_bytes(encoder.clone(), array.clone());
 
         // Compress the data if compression is enabled
@@ -398,13 +398,13 @@ impl PhysicalColEncoder for DictColEncoder {
         let indices = cast_index_dtype(indices, dict.len());
         let indices_dtype = indices.data_type().clone();
         let dict_encoder =
-            create_encunit_encoder(self.wasm_context.clone(), dict.data_type().clone(), false);
+            create_encunit_encoder(self.wasm_context.clone(), dict.data_type().clone(), false)?;
         let dict_enc_unit = encode_to_bytes(dict_encoder.clone(), dict.clone());
         let indices_encoder = create_encunit_encoder(
             self.wasm_context.clone(),
             indices.data_type().clone(),
             false,
-        );
+        )?;
         let indices_enc_unit = encode_to_bytes(indices_encoder.clone(), indices.clone());
 
         // Compress the dictionary data if compression is enabled
@@ -561,7 +561,7 @@ impl SharedDictColEncoder {
         let mut accumulated_size = 0;
         for arr in indices_arrs {
             let encoder =
-                create_encunit_encoder(self.wasm_context.clone(), arr.data_type().clone(), false);
+                create_encunit_encoder(self.wasm_context.clone(), arr.data_type().clone(), false)?;
             let enc_unit = encode_to_bytes(encoder.clone(), arr.clone());
 
             // Compress the data if compression is enabled
@@ -765,7 +765,7 @@ impl GLBestEncoder {
         let mut accumulated_size = 0;
         for arr in arrs {
             let encoder =
-                create_encunit_encoder(self.wasm_context.clone(), arr.data_type().clone(), false);
+                create_encunit_encoder(self.wasm_context.clone(), arr.data_type().clone(), false)?;
             let enc_unit = encode_to_bytes(encoder.clone(), arr.clone());
 
             // Compress the data if compression is enabled

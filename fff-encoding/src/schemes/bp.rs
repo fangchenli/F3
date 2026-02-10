@@ -23,7 +23,9 @@ impl BPEncoder {
     fn encode(&self, arr: ArrayRef) -> Result<EncUnit> {
         debug_assert!(arr.to_data().buffers().len() == 1);
         debug_assert!(*arr.data_type() == DataType::UInt32);
-        let data = arr.as_any().downcast_ref::<UInt32Array>().unwrap();
+        let data = arr.as_any().downcast_ref::<UInt32Array>().ok_or_else(|| {
+            fff_core::errors::Error::General("Failed to downcast to UInt32Array".to_string())
+        })?;
         let data = data.values().as_ref();
         let num_chunks = ceil(data.len(), MINIBLOCK_SIZE);
         let mut bw_per_mini_block: Vec<u8> = Vec::with_capacity(num_chunks);
@@ -66,7 +68,12 @@ impl BPEncoder {
         // let metadata: Bytes = s.take_buffer().into();
         let metadata = Bytes::from(
             rkyv::to_bytes::<_, 256>(&metadata)
-                .unwrap()
+                .map_err(|e| {
+                    fff_core::errors::Error::General(format!(
+                        "Failed to serialize BP metadata: {}",
+                        e
+                    ))
+                })?
                 .into_boxed_slice(),
         );
         let metadata_size = metadata.len() as u32;
@@ -96,7 +103,10 @@ impl Encoder for BPEncoder {
     fn encode(&self, arr: ArrayRef) -> Result<EncUnit> {
         match arr.data_type() {
             DataType::UInt32 => self.encode(arr),
-            _ => unimplemented!(),
+            other => Err(fff_core::errors::Error::General(format!(
+                "BP encoding not supported for data type {:?}",
+                other
+            ))),
         }
     }
     fn encoding_type(&self) -> Encoding {
@@ -125,7 +135,11 @@ impl Decoder for BPDecoder {
         }
         let output_slice: &mut [u32] = bytemuck::cast_slice_mut(output_buffer.as_mut());
         let metadata = &self.state.metadata();
-        let bw_per_mini_block = metadata.metadata.as_ref().unwrap();
+        let bw_per_mini_block = metadata.metadata.as_ref().ok_or_else(|| {
+            fff_core::errors::Error::General(
+                "BP metadata missing bit-width per mini block".to_string(),
+            )
+        })?;
         let offsets = &metadata.mini_blocks_offsets;
         let data = &self.state.data;
         let data: &[u32] = bytemuck::cast_slice(data);
@@ -145,7 +159,9 @@ impl Decoder for BPDecoder {
     }
 
     fn decode_a_vector(&mut self) -> Result<Option<Vec<Buffer>>> {
-        unimplemented!();
+        Err(fff_core::errors::Error::General(
+            "BP decode_a_vector not implemented".to_string(),
+        ))
     }
 }
 

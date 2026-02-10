@@ -14,12 +14,16 @@ pub fn create_encunit_encoder(
     wasm_context: Arc<WASMWritingContext>,
     data_type: DataType,
     enable_dict: bool,
-) -> Rc<dyn Encoder> {
+) -> fff_core::errors::Result<Rc<dyn Encoder>> {
     if let Some(lib) = wasm_context.data_type_to_wasm_lib(&data_type) {
         // FIXME: function name is fixed as "encode"
-        Rc::new(CustomEncoder::try_new(lib.encode_lib_path(), "encode").unwrap())
+        Ok(Rc::new(
+            CustomEncoder::try_new(lib.encode_lib_path(), "encode").map_err(|e| {
+                fff_core::errors::Error::General(format!("Failed to create custom encoder: {}", e))
+            })?,
+        ))
     } else {
-        Rc::new(VortexEncoder::new(enable_dict))
+        Ok(Rc::new(VortexEncoder::new(enable_dict)))
     }
     // match data_type {
     //     DataType::List(_) | DataType::LargeList(_) => {

@@ -39,16 +39,11 @@ impl WasmBuffer {
 
 impl Drop for WasmBuffer {
     fn drop(&mut self) {
-        // println!("{:#x}", self.host_ptr);
-        // println!("{:#x}", self.guest_ptr);
-        // dbg!(self.len);
         // BUGFIX(1021): only dealloc when the buffer is not dangling ptr
-        // if self.len() > 0 {
-        let mut instance = self.instance.lock().unwrap();
-        // BUGFIX(1223): we should drop the Box::<arrow_buffer::Buffer> in Wasm, not dealloc the bytes
-        instance.buffer_drop(self.arrow_buffer_address).unwrap();
-        // instance.print_stdio();
-        // }
+        if let Ok(mut instance) = self.instance.lock() {
+            // BUGFIX(1223): we should drop the Box::<arrow_buffer::Buffer> in Wasm, not dealloc the bytes
+            let _ = instance.buffer_drop(self.arrow_buffer_address);
+        }
     }
 }
 

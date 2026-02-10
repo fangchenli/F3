@@ -41,13 +41,13 @@ impl RamFile {
 
     /// Take the file's contents.
     pub fn take(&self) -> Vec<u8> {
-        let mut data = self.data.lock().unwrap();
+        let mut data = self.data.lock().expect("RamFile mutex poisoned in take()");
         std::mem::take(&mut *data)
     }
 
     /// Print the RamFile content to stdout, only work on Wasi
     pub fn print(&self) {
-        let data = self.data.lock().unwrap();
+        let data = self.data.lock().expect("RamFile mutex poisoned in print()");
         println!("Wasm instance stdio: {}\n", String::from_utf8_lossy(&data));
     }
 }
@@ -67,7 +67,10 @@ impl WasiFile for RamFile {
     }
 
     async fn write_vectored<'a>(&self, bufs: &[std::io::IoSlice<'a>]) -> Result<u64, Error> {
-        let mut data = self.data.lock().unwrap();
+        let mut data = self
+            .data
+            .lock()
+            .map_err(|_| Error::trap(anyhow::anyhow!("RamFile mutex poisoned")))?;
         let written: u64 = bufs.iter().map(|buf| buf.len() as u64).sum();
         if data.len() + written as usize > self.size_limit {
             return Err(Error::overflow());
